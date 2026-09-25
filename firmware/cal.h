@@ -115,6 +115,10 @@ static float px_kv(int p){ return (float)KvRC_[px_split(p)]/p2(kvScale_); }
 static float f_vdd, f_ta, f_gain, f_taTr;
 static int   f_sub;
 
+volatile uint32_t aux_rejects;
+static float lg_vdd=3.3f, lg_ta=25.f, lg_gain=1.f;
+static int   lg_valid=0, lg_gfp=1024;
+
 static void calc_frame_params(uint16_t ctrlReg, int subpage){
     int resRAM=(ctrlReg&0x0C00)>>10;
     float vdd=(float)(int16_t)frame[810];
@@ -129,6 +133,20 @@ static void calc_frame_params(uint16_t ctrlReg, int subpage){
 
     float g=(float)(int16_t)frame[778]; if(g==0.f) g=1.f;
     f_gain=(float)gainEE/g;
+
+    /* The aux words share the sensor's RAM with the pixels and can be caught
+     * mid-update. Judge the *computed* quantities against physical limits and
+     * reuse the previous set when impossible -- Ta and VDD move over seconds,
+     * so last frame's values are genuinely the right answer, not a fudge. */
+    if(f_vdd>3.0f && f_vdd<3.6f && f_ta>-20.f && f_ta<85.f &&
+       f_gain>0.7f && f_gain<1.4f){
+        lg_vdd=f_vdd; lg_ta=f_ta; lg_gain=f_gain;
+        lg_gfp=(int)(f_gain*1024.f);
+        lg_valid=1;
+    } else {
+        if(lg_valid){ f_vdd=lg_vdd; f_ta=lg_ta; f_gain=lg_gain; }
+        aux_rejects++;          /* dbg[14]: how often the sensor's aux words were caught mid-update */
+    }
 
     float ta4=fsq(fsq(f_ta+273.15f));
     float tr4=fsq(fsq((f_ta-8.f)+273.15f));

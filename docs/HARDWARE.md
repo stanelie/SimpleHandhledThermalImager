@@ -90,6 +90,51 @@ two subpages.
 
 Measured: 23.8 ms to read 832 words (1668 bytes) at 731 kHz.
 
+### The aux words get caught mid-update
+
+The housekeeping words share the sensor's RAM with the pixels:
+
+| index | address | meaning |
+|---|---|---|
+| 768 | `0x0700` | ptatArt |
+| 778 | `0x070A` | gain |
+| 800 | `0x0720` | ptat |
+| 810 | `0x072A` | vdd |
+
+At a 64 Hz subpage rate the sensor rewrites its RAM every 15.6 ms, but a full
+read takes ~23.8 ms, so **every read straddles an update**. Reading all 832 words
+in one burst puts these words at the *end* of the transfer, ~23 ms in, which is
+exactly where the update lands — and they intermittently come back garbage, one
+word at a time. Observed values against their normal readings:
+
+| word | normal | seen when corrupt |
+|---|---|---|
+| `frame[778]` gain | ~6168 | 32767 |
+| `frame[800]` ptat | ~1652 | −32 |
+| `frame[768]` ptatArt | ~−21 | 19771 |
+
+Gain and Ta feed **every** pixel, so a single bad word flashes the whole image
+and throws the min/max readouts to absurd values (~80 °C, or −273 °C when
+`mlx_to()` hits its `ac<=0` bail-out). The pixels themselves are fine — they are
+read early and escape the update — which makes this look like an image bug when
+it is not.
+
+Mitigations used here, in `cal.h`/`main.c`:
+
+1. Read the aux block (`0x0700`, 64 words) **first**, immediately after
+   data-ready, when the sensor has just finished writing.
+2. Validate the **computed** VDD / Ta / gain against physical ranges
+   (3.0–3.6 V, −20–85 °C, 0.7–1.4) and fall back to the previous frame's values
+   when impossible. Ta and VDD drift over seconds, so the previous values are the
+   physically correct answer, not a fudge. `dbg[14]` counts how often this fires
+   (a handful per thousand frames).
+3. Do **not** re-read the gain separately in the pixel-correction path. Doing so
+   is another chance to catch a mid-update word, and a `gain==0` fallback there
+   multiplies every pixel by ~6200 and saturates the frame.
+
+Dropping the subpage rate to 32 Hz would make reads fit inside one update period
+and avoid this structurally, at the cost of roughly 3 fps.
+
 ## Controls
 
 The switch common returns to **pin 47 (VSS)**, i.e. switches are active-low.

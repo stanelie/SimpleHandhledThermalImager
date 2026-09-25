@@ -61,6 +61,10 @@ no stale `openocd` process is holding the port.
 
 ## Restoring the stock firmware
 
+The dump lives in [`stock-firmware/`](stock-firmware/) with its sha256 — but it is
+**gitignored and therefore not on GitHub**, so it exists only on the local
+machine. See that folder's README.
+
 Take a dump **before** you flash anything:
 
 ```sh
@@ -105,3 +109,7 @@ docs/         hardware map and reverse-engineering notes
   temperature but not calibrated per pixel. Converting all 768 pixels would cost
   most of the frame rate on a soft-float Cortex-M3.
 - The SPI NOR flash (XT25F128F) is present but unused.
+- A rare full-device hang was seen once and not yet reproduced; when caught, the
+  core showed **no fault** (CFSR/HFSR clear) and the loop was still advancing, so
+  it is not a CPU exception. `dbg[8]`/`dbg[9]` count I2C failures and bus
+  recoveries, which are the leading suspects.

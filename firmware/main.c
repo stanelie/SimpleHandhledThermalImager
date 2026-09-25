@@ -45,6 +45,7 @@
 volatile uint32_t dbg[24];
 static int16_t  frame[834];
 static int min_idx=400, max_idx=400;
+
 /* label values, averaged and refreshed at most 3x/sec */
 static int32_t disp_c, disp_n, disp_x;
 #define CENTER_IDX 400
@@ -316,10 +317,10 @@ static void denoise(void){
 
 /* gain-correct then subtract the per-pixel offset -- kills the fixed-pattern dots */
 static void correct_frame(void){
-    uint16_t g=0;
-    mlx_read(0x070A,&g,1);
-    int32_t gr=(int16_t)g; if(gr==0) gr=1;
-    int32_t gfp=(gainEE*1024)/gr;
+    /* use the gain already validated in calc_frame_params -- a second I2C read
+     * here was a second chance to catch a mid-update word, and its gr==0
+     * fallback multiplied every pixel by ~6200 and saturated the frame */
+    int32_t gfp = lg_gfp;
     for(int i=0;i<768;i++){
         int32_t v=(((int32_t)frame[i]*gfp)>>10) - poff[i];
         frame[i]=(int16_t)(v>32767?32767:(v<-32768?-32768:v));
@@ -492,7 +493,13 @@ int main(void){
         }
 
         uint32_t t=CYC;
-        if(!mlx_read(0x0400, frame, 832)){
+        /* aux first: the sensor has just finished writing, so these are stable */
+        if(!mlx_read(0x0700, &frame[768], 64)){
+            dbg[8]=++fails; dbg[9]=++recov;
+            i2c_recover();
+            continue;
+        }
+        if(!mlx_read(0x0400, frame, 768)){
             dbg[8]=++fails; dbg[9]=++recov;
             i2c_recover();
             continue;
@@ -507,8 +514,10 @@ int main(void){
         dbg[16]=(uint32_t)tc; dbg[17]=(uint32_t)tn; dbg[18]=(uint32_t)tx;
         dbg[19]=(uint32_t)(int32_t)(f_ta*100.f);
 
-        sum_c+=tc; sum_n+=tn; sum_x+=tx; nsamp++;
-        if(!primed){ disp_c=tc; disp_n=tn; disp_x=tx; primed=1; }
+        /* don't feed the labels until the housekeeping values have validated once,
+         * or the first frames after power-on show nonsense temperatures */
+        if(lg_valid){ sum_c+=tc; sum_n+=tn; sum_x+=tx; nsamp++; }
+        if(!primed && lg_valid){ disp_c=tc; disp_n=tn; disp_x=tx; primed=1; }
         if((CYC-t_lbl) >= 24000000u){          /* 1/3 second */
             if(nsamp){
                 disp_c=sum_c/(int32_t)nsamp;
@@ -519,6 +528,9 @@ int main(void){
         }
 
         correct_frame();
+
+        dbg[14]=aux_rejects;
+
         denoise();
 
         t=CYC;
