@@ -228,7 +228,7 @@ static uint32_t isqrt32(uint32_t n){
 }
 
 static int pal_id = 0;
-static int gamma_id = 0;   /* 0=1.5  1=2.0  2=3.0 */
+static int gamma_id = 0;   /* cycles 4.0 -> 3.0 -> 2.0 -> 1.5 -> 4.0 */
 
 static void pal_init(void){
     for(int i=0;i<256;i++){
@@ -250,11 +250,14 @@ static void pal_init(void){
         pal[i]=(uint16_t)(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3));
     }
     for(int i=0;i<256;i++){
-        uint32_t c3=(uint32_t)i*(uint32_t)i*(uint32_t)i;
+        uint32_t c2=(uint32_t)i*(uint32_t)i;
+        uint32_t c3=c2*(uint32_t)i;
         uint32_t r;
-        if(gamma_id==0)      r=isqrt32(c3/255u);        /* 1.5 */
-        else if(gamma_id==1) r=((uint32_t)i*i)/255u;    /* 2.0 */
-        else                 r=c3/65025u;               /* 3.0 */
+        /* 255*(i/255)^g ; i^4 peaks at 4228250625, which still fits a uint32 */
+        if(gamma_id==0)      r=(c2*c2)/16581375u;       /* 4.0 */
+        else if(gamma_id==1) r=c3/65025u;               /* 3.0 */
+        else if(gamma_id==2) r=c2/255u;                 /* 2.0 */
+        else                 r=isqrt32(c3/255u);        /* 1.5 */
         gam[i]=(uint8_t)(r>255?255:r);
     }
 }
@@ -265,7 +268,6 @@ static inline void px_fast(uint16_t v){
     GPIOB_ODR=0xFC00u|(uint8_t)v;      GPIOC_BRR=PC15; GPIOC_BSRR=PC15;
 }
 
-static int16_t prev[768];
 static uint16_t ee[832];
 static int16_t  poff[768];
 static int32_t  gainEE;
@@ -297,23 +299,104 @@ static void extract_offsets(void){
     gainEE=(int16_t)ee[48];
 }
 
-/* Per-pixel exponential moving average. NOISE_SHIFT 2 = ~200ms time constant
- * at 20fps; higher = quieter but smearier. Costs 768 ops/frame, i.e. nothing. */
-#define NOISE_SHIFT 2
+#ifndef DIAG
+/* Motion-adaptive temporal filter.
+ *
+ * A fixed-strength average forces a straight trade: quiet image or responsive
+ * image, pick one. Instead, compare each pixel's change against an estimate of
+ * the noise floor and filter hard only where the change looks like noise. Static
+ * scenes get ~8 frames of averaging; genuinely moving pixels pass through almost
+ * untouched, so there is no added latency on the parts of the image that matter.
+ *
+ * The noise floor is measured, not assumed: it tracks the mean absolute
+ * frame-to-frame change, updated slowly so real motion cannot inflate it much.
+ * Runs over the 768 sensor pixels, so the cost is negligible.
+ */
 static int32_t acc[768];
 static int acc_primed;
+static int32_t noise_est = 4000;      /* fixed point <<8 */
+volatile uint32_t dbg_noise;
+
+/* A/B test of the MLX90640 ADC resolution (0x800D bits 11:10).
+ * Raw counts scale with resolution, so absolute noise is not comparable --
+ * normalise to the scene span. Alternating legs keeps the scene identical.
+ * abtest[] = {mean normalised noise 18-bit, same 19-bit, samples, samples} */
+volatile uint32_t abtest[4];
+
 static void denoise(void){
     if(!acc_primed){
         for(int i=0;i<768;i++) acc[i]=(int32_t)frame[i]<<8;
         acc_primed=1;
-    } else {
-        for(int i=0;i<768;i++)
-            acc[i] += ((((int32_t)frame[i])<<8) - acc[i]) >> NOISE_SHIFT;
+        return;
     }
-    for(int i=0;i<768;i++) frame[i]=(int16_t)(acc[i]>>8);
+    int32_t t_hi=noise_est*4, t_mid=noise_est*2, sumd=0;
+    for(int i=0;i<768;i++){
+        int32_t d=((int32_t)frame[i]<<8) - acc[i];
+        int32_t ad = d<0 ? -d : d;
+        sumd += ad;
+        int sh = (ad>t_hi) ? 0 : (ad>t_mid) ? 1 : 3;
+        acc[i] += d>>sh;
+        frame[i] = (int16_t)(acc[i]>>8);
+    }
+    noise_est += ((sumd/768) - noise_est)>>3;
+    if(noise_est<256) noise_est=256;
+    dbg_noise=(uint32_t)noise_est;
 }
+#endif
+
 
 #include "cal.h"
+
+/* Flat-field / non-uniformity correction.
+ *
+ * Measured FPN is ~3.3 counts against a ~50-count scene span, which at 10x
+ * upscale reads as a grid of blobs. Rather than chase its origin in the
+ * calibration maths, measure it: average frames of a uniform surface and store
+ * each pixel's deviation. High-passed against a 3x3 local mean so a target that
+ * isn't perfectly flat (or lens vignetting) is not baked in. Applied
+ * incrementally, so repeated calibrations converge. */
+volatile int32_t  avg_acc[768];
+volatile uint32_t avg_n;
+
+#ifdef DIAG
+/* Characterise the sensor with the display pipeline out of the way.
+ * Streaming statistics relative to a per-pixel reference, so the squares stay
+ * small and no frame buffers are needed:
+ *   mean[i]   = ref[i] + d_sum[i]/n           -> averaging leaves FIXED pattern
+ *   var[i]    = d_sumsq[i]/n - (d_sum[i]/n)^2 -> per-pixel TEMPORAL noise
+ * Host-side maths; the device just accumulates. */
+volatile int16_t  d_ref[768];
+volatile int32_t  d_sum[768];
+volatile int32_t  d_sumsq[768];
+volatile uint32_t d_n, d_cfg;
+#endif
+static int16_t nuc[768];
+static int nuc_cnt;                 /* >0 while capturing */
+int nuc_busy(void){ return nuc_cnt>0; }
+
+static void nuc_start(void){
+    for(int i=0;i<768;i++) avg_acc[i]=0;
+    nuc_cnt=32;
+}
+static void nuc_step(void){
+    for(int i=0;i<768;i++) avg_acc[i]+=frame[i];
+    if(--nuc_cnt) return;
+    for(int r=0;r<SRC_H;r++){
+        for(int c=0;c<SRC_W;c++){
+            int i=r*SRC_W+c;
+            int32_t sum=0, n=0;
+            for(int rr=(r?r-1:0); rr<=(r<SRC_H-1?r+1:r); rr++)
+                for(int cc=(c?c-1:0); cc<=(c<SRC_W-1?c+1:c); cc++){
+                    sum+=avg_acc[rr*SRC_W+cc]; n++;
+                }
+            int32_t d = (avg_acc[i] - sum/n)/32;     /* high-pass, /32 frames */
+            int32_t v = nuc[i] + d;
+            nuc[i]=(int16_t)(v>4000?4000:(v<-4000?-4000:v));
+        }
+    }
+}
+
+
 
 /* gain-correct then subtract the per-pixel offset -- kills the fixed-pattern dots */
 static void correct_frame(void){
@@ -322,7 +405,7 @@ static void correct_frame(void){
      * fallback multiplied every pixel by ~6200 and saturated the frame */
     int32_t gfp = lg_gfp;
     for(int i=0;i<768;i++){
-        int32_t v=(((int32_t)frame[i]*gfp)>>10) - poff[i];
+        int32_t v=(((int32_t)frame[i]*gfp)>>10) - poff[i] - nuc[i];
         frame[i]=(int16_t)(v>32767?32767:(v<-32768?-32768:v));
     }
 }
@@ -335,13 +418,10 @@ static void render_prep(void){
     /* Trimmed range: ignore the 4 most extreme pixels at each end, so a single
      * corrupted word cannot blow out the auto-scale (that was the blue flash). */
     int16_t lo[4]={32767,32767,32767,32767}, hi[4]={-32768,-32768,-32768,-32768};
-    uint32_t jump=0;
     for(int i=0;i<768;i++){
         int16_t v=frame[i];
         if(v<lo[3]){ int k=3; while(k>0 && v<lo[k-1]){ lo[k]=lo[k-1]; k--; } lo[k]=v; }
         if(v>hi[3]){ int k=3; while(k>0 && v>hi[k-1]){ hi[k]=hi[k-1]; k--; } hi[k]=v; }
-        int32_t d=(int32_t)v-(int32_t)prev[i]; if(d<0)d=-d;
-        if(d>2000) jump++;
     }
     int16_t mn=lo[3], mx=hi[3];
     for(int i=0;i<768;i++){ if(frame[i]==mn) min_idx=i; else if(frame[i]==mx) max_idx=i; }
@@ -352,9 +432,6 @@ static void render_prep(void){
         for(int c=0;c<SRC_W;c++)
             { int16_t v2=frame[r*SRC_W+c]; if(((r+c)&1)==0) s0+=v2; else s1+=v2; }
     dbg[12]=(uint32_t)(s0/384); dbg[13]=(uint32_t)(s1/384);
-    for(int i=0;i<768;i++) prev[i]=frame[i];
-    if(jump>dbg[3]) dbg[3]=jump;       /* worst frame seen so far */
-    if(jump>50) dbg[11]++;             /* how many frames looked corrupt */
 
     /* Smooth the auto-range so one bad word can't wash out a whole frame. */
     if(!scale_primed){ mn_s=mn; mx_s=mx; scale_primed=1; }
@@ -438,6 +515,7 @@ int main(void){
     uint16_t ctrl=0;
     mlx_read(0x800D,&ctrl,1);
     ctrl = (uint16_t)((ctrl & ~(7u<<7)) | (7u<<7));   /* 64 Hz subpage rate */
+    ctrl = (uint16_t)((ctrl & ~(3u<<10)) | (2u<<10));  /* 18-bit ADC */
     mlx_write(0x800D, ctrl);
     dbg[1]=ctrl;
     dbg[14]=mlx_read(0x2400, ee, 832);
@@ -446,6 +524,47 @@ int main(void){
     dbg[15]=(uint32_t)gainEE;
     mlx_write(0x8000,0x0030);
 
+#ifdef DIAG
+    /* DIAG_RES: 2 = 18-bit, 3 = 19-bit.  DIAG_RATE: 6 = 32Hz, 7 = 64Hz */
+#ifndef DIAG_RES
+#define DIAG_RES 3
+#endif
+#ifndef DIAG_RATE
+#define DIAG_RATE 7
+#endif
+    ctrl = (uint16_t)((ctrl & ~(7u<<7)) | ((uint32_t)DIAG_RATE<<7));
+    ctrl = (uint16_t)((ctrl & ~(3u<<10)) | ((uint32_t)DIAG_RES<<10));
+    mlx_write(0x800D, ctrl);
+    { uint16_t rb=0; mlx_read(0x800D,&rb,1);      /* read back: did it actually take? */
+      d_cfg = ((uint32_t)ctrl<<16) | rb; }
+    mlx_write(0x8000,0x0030);
+
+    for(int w=0; w<40; w++){                      /* warm up / settle */
+        uint16_t st=0; uint32_t tw=CYC;
+        while((CYC-tw)<7200000u){ if(mlx_read(0x8000,&st,1) && (st&8)) break; }
+        mlx_read(0x0400, frame, 768);
+        mlx_write(0x8000,0x0030);
+    }
+    { uint16_t st=0; uint32_t tw=CYC;
+      while((CYC-tw)<7200000u){ if(mlx_read(0x8000,&st,1) && (st&8)) break; }
+      mlx_read(0x0400, frame, 768);
+      mlx_write(0x8000,0x0030);
+      for(int i=0;i<768;i++) d_ref[i]=frame[i]; }
+
+    while(1){
+        uint16_t st=0; uint32_t tw=CYC;
+        int ok=0;
+        while((CYC-tw)<7200000u){ if(mlx_read(0x8000,&st,1) && (st&8)){ ok=1; break; } }
+        if(!ok){ i2c_recover(); mlx_write(0x800D,ctrl); mlx_write(0x8000,0x0030); continue; }
+        if(!mlx_read(0x0400, frame, 768)){ i2c_recover(); continue; }
+        mlx_write(0x8000,0x0030);
+        for(int i=0;i<768;i++){
+            int32_t d=(int32_t)frame[i]-(int32_t)d_ref[i];
+            d_sum[i]+=d; d_sumsq[i]+=d*d;
+        }
+        d_n++;
+    }
+#endif
     uint32_t frames=0, t0=CYC, iters=0, fails=0, recov=0;
     int32_t sum_c=0, sum_n=0, sum_x=0; uint32_t nsamp=0, t_lbl=CYC; int primed=0;
     while(1){
@@ -458,7 +577,8 @@ int main(void){
             if(b==raw) cnt++; else { raw=b; cnt=0; }
             if(cnt>=2 && b!=stable){
                 stable=b;
-                if(b==1) overlay_on=!overlay_on;   /* 2045 level toggles overlay */
+                if(b==1) overlay_on=!overlay_on;      /* 2045 level toggles overlay */
+                else if(b==2 && !nuc_cnt) nuc_start(); /* 0 level: flat-field calibrate */
             }
         }
         bucket(0,adcnow[0]); bucket(1,adcnow[1]);
@@ -472,7 +592,7 @@ int main(void){
                 stable=act;
                 if(act==1){ pal_id=(pal_id+2)%3; pal_init(); }
                 else if(act==2){ pal_id=(pal_id+1)%3; pal_init(); }
-                else if(act==3){ gamma_id=(gamma_id+1)%3; pal_init(); }
+                else if(act==3){ gamma_id=(gamma_id+1)%4; pal_init(); }
             }
             dbg[21]=(uint32_t)cur_pair;
         }
@@ -531,7 +651,10 @@ int main(void){
 
         dbg[14]=aux_rejects;
 
+        if(nuc_cnt) nuc_step();
+#ifndef DIAG
         denoise();
+#endif
 
         t=CYC;
         render_prep();
@@ -541,6 +664,7 @@ int main(void){
         render_band(img_h/2, img_h-1);
         if(overlay_on) draw_bar_if_changed();
         dbg[5]=CYC-t;
+
 
         frames++;
         if((CYC-t0) >= 72000000u){ dbg[4]=frames; frames=0; t0=CYC; }

@@ -135,6 +135,38 @@ Mitigations used here, in `cal.h`/`main.c`:
 Dropping the subpage rate to 32 Hz would make reads fit inside one update period
 and avoid this structurally, at the cost of roughly 3 fps.
 
+### What the sensor actually gives you (measured)
+
+Characterised with the `diag` build (see the Makefile), which reads raw frames
+with the whole display pipeline out of the way and accumulates per-pixel
+statistics on-device. Camera stationary, pointed at a uniform surface, ~1200
+frames per configuration. Counts are raw sensor LSBs.
+
+| config | temporal noise (median) | fixed pattern (high-pass) | FPN ÷ temporal |
+|---|---|---|---|
+| 18-bit / 64 Hz | 3.26 | **86.6** | 27x |
+| 18-bit / 32 Hz | 2.03 | 85.7 | 42x |
+| 19-bit / 64 Hz | 6.68 | **25.2** | 3.8x |
+| 19-bit / 32 Hz | 4.01 | 24.9 | 6.2x |
+
+Conclusions that drove the current design:
+
+- **Fixed-pattern noise dominates random noise by 4x to 40x.** Any visible
+  "grid" or "dots" is FPN, not noise, and no amount of filtering fixes it. This
+  is the single most useful fact about this sensor.
+- **The FPN is stable**: the same pixels are worst in every configuration --
+  (19,25), (11,25), (19,27), (7,18). That is what makes a flat-field correction
+  work, and it is why the firmware has one.
+- **The per-pixel EEPROM offset removes most of it**: raw FPN ~21 counts
+  high-passed, ~3.3 counts after `poff[]`. The flat-field pass removes the rest.
+- **32 Hz halves temporal noise** (3.26 -> 2.03 and 6.68 -> 4.01, both ~1.6x,
+  matching the sqrt(2) expected from doubled integration time). FPN is unaffected
+  by refresh rate. 64 Hz is used anyway, because the extra latency at 32 Hz is
+  more objectionable in the hand than the noise it removes.
+- Absolute counts are **not comparable across ADC resolutions** -- the LSB scale
+  differs and a uniform target gives no calibrated signal to normalise against.
+  Do not read the 18-bit vs 19-bit rows as a like-for-like comparison.
+
 ## Controls
 
 The switch common returns to **pin 47 (VSS)**, i.e. switches are active-low.
@@ -145,8 +177,8 @@ share one pin, distinguished by voltage:
 | level (12-bit) | meaning |
 |---|---|
 | 4095 | idle |
-| 2045 | middle button (mapped to OSD toggle) |
-| 0 | second button |
+| 2045 | middle button -> toggles the OSD |
+| 0 | second button -> runs a flat-field calibration |
 
 PA0 is also analog but sits constant at ~3201 (~2.58 V) and never moves — it is
 almost certainly a **battery monitor**, not an input.

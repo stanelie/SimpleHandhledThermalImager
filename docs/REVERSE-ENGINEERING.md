@@ -109,6 +109,41 @@ When a control's function is ambiguous, put the decoded state **on the screen**
 as a digit rather than reading memory over SWD once per press. One flash then
 answers every question at human speed.
 
+## Characterise the sensor before filtering it
+
+Image-quality work went badly until the sensor was measured directly. Several
+corrections were added on reasoning alone -- a subpage equaliser, the Kta/Kv
+offset terms, a spatial blur -- and once stacked they could not be told apart,
+let alone attributed. All three were later removed as measurably pointless.
+
+The `diag` build (`make diag`) reads raw frames with the display pipeline
+compiled out, and accumulates per-pixel statistics on-device relative to a
+captured reference, so no frame buffers are needed:
+
+```
+mean[i] = ref[i] + sum[i]/n              -> averaging leaves the FIXED pattern
+var[i]  = sumsq[i]/n - (sum[i]/n)^2      -> per-pixel TEMPORAL noise
+```
+
+Separating those two numbers is the whole point: fixed and random noise look
+similar on screen but need completely different treatments, and for this sensor
+the fixed part is 4x to 40x larger. Chasing it as if it were random noise cannot
+work.
+
+Two traps that wasted real time:
+
+- **`make` will not rebuild on a `-D` flag change alone.** A sweep across sensor
+  configurations silently reused one binary for every run, producing four
+  "different" configurations with identical numbers. Always force a rebuild, and
+  **read the register back from the device** to prove the setting took -- the
+  readback is what caught it.
+- **Normalise carefully, or not at all.** Raw counts scale with ADC resolution,
+  and a uniform calibration target has no signal to normalise against, so
+  "noise as a fraction of span" was meaningless there -- span was mostly FPN.
+  An earlier A/B that appeared to show 19-bit winning by 42% was measuring
+  temporal noise only, and was blind to the fixed pattern that was the actual
+  complaint.
+
 ## Debugging technique
 
 The firmware keeps a `volatile uint32_t dbg[]` array that OpenOCD reads out of a

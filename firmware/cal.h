@@ -138,8 +138,11 @@ static void calc_frame_params(uint16_t ctrlReg, int subpage){
      * mid-update. Judge the *computed* quantities against physical limits and
      * reuse the previous set when impossible -- Ta and VDD move over seconds,
      * so last frame's values are genuinely the right answer, not a fudge. */
+    /* raw counts scale with ADC resolution, so normalise the gain ratio before
+     * range-checking it, or the check only ever holds at one resolution */
+    float gnorm = f_gain * p2(resRAM - resEE_);
     if(f_vdd>3.0f && f_vdd<3.6f && f_ta>-20.f && f_ta<85.f &&
-       f_gain>0.7f && f_gain<1.4f){
+       gnorm>0.7f && gnorm<1.4f){
         lg_vdd=f_vdd; lg_ta=f_ta; lg_gain=f_gain;
         lg_gfp=(int)(f_gain*1024.f);
         lg_valid=1;

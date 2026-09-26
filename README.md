@@ -20,7 +20,7 @@ describes how, and which approaches wasted time.
 | frame rate | 4 fps | **19 fps** |
 | image | 32×24 nearest-neighbour, visible fixed-pattern noise | bilinear 10× upscale to 320×240, offset-calibrated, temporally denoised |
 | temperature | none displayed | min / centre / max in °C |
-| palette | fixed | 3 palettes + 3 gamma curves, switchable live |
+| palette | fixed | 3 palettes + 4 gamma curves, switchable live |
 | USB / snapshots | yes | removed |
 
 The single biggest win was not code at all: **the stock firmware left the
@@ -39,7 +39,23 @@ ceiling, worth roughly another 2 fps.
 |---|---|
 | middle button | toggle the OSD (when hidden, the image expands to the full 240 rows) |
 | wheel left / right | cycle palette: rainbow → ironbow → grayscale |
-| wheel push | cycle gamma: 1.5 → 2.0 → 3.0 |
+| wheel push | cycle gamma: 4.0 → 3.0 → 2.0 → 1.5 (default 4.0) |
+| second button | flat-field calibration — point at a uniform surface and press; crosshair turns red for ~1.7 s |
+
+## Processing pipeline
+
+```
+read raw frame  ->  gain + per-pixel offset + flat-field  ->  adaptive temporal filter  ->  bilinear 10x upscale + gamma + palette
+```
+
+Every stage is there because a measurement said so, and three earlier stages were
+removed once measured: a subpage equaliser (the difference was ~0.4 counts), the
+Kta/Kv offset terms (a uniform 1.6-count shift), and a spatial blur (it only
+softened random noise the temporal filter already handled). See the
+characterisation table in [`docs/HARDWARE.md`](docs/HARDWARE.md).
+
+Filtering happens on the 32x24 sensor data, before upscaling -- 768 pixels
+instead of 76800, a 100x difference in cost.
 
 ## Build and flash
 
@@ -51,7 +67,13 @@ cd firmware
 make          # build
 make flash    # flash over SWD
 make debug    # dump the dbg[] telemetry array from a running target
+make diag     # flash the sensor-characterisation build (no display pipeline)
 ```
+
+`tools/sweep_diag.sh` and `tools/analyse_diag.py` drive the `diag` build across
+sensor configurations and report per-pixel temporal noise and fixed-pattern
+noise. Note it force-rebuilds: `make` will not rebuild on a `-D` flag change
+alone, which silently invalidated an entire measurement sweep once.
 
 Wire the ST-Link to the 4-pad debug header: **GND→GND, SWDIO→D1 pad,
 SWCLK→D0 pad**. Leave the ST-Link's 3.3 V disconnected — the camera powers
@@ -108,6 +130,10 @@ docs/         hardware map and reverse-engineering notes
   rendered from gain- and offset-corrected raw counts, which is monotonic in
   temperature but not calibrated per pixel. Converting all 768 pixels would cost
   most of the frame rate on a soft-float Cortex-M3.
+- **The flat-field table lives in RAM and is lost on every power cycle**, so the
+  grid returns until the second button is pressed again. Since FPN measured
+  26-40x larger than random noise, persisting this table to the unused SPI flash
+  is probably the highest-value remaining improvement.
 - The SPI NOR flash (XT25F128F) is present but unused.
 - A rare full-device hang was seen once and not yet reproduced; when caught, the
   core showed **no fault** (CFSR/HFSR clear) and the loop was still advancing, so

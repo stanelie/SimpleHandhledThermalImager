@@ -104,10 +104,13 @@ static void draw_overlay_test(void){
     g_fv=1; g_fh=1;
 }
 
+extern int nuc_busy(void);
+
 static void draw_crosshair(void){
     int cy = img_h/2;
-    fill_rect(LCD_W/2-10, cy-1, 21, 2, C_WHITE);
-    fill_rect(LCD_W/2-1,  cy-10, 2, 21, C_WHITE);
+    uint16_t col = nuc_busy() ? C_RED : C_WHITE;   /* red while flat-field calibrating */
+    fill_rect(LCD_W/2-10, cy-1, 21, 2, col);
+    fill_rect(LCD_W/2-1,  cy-10, 2, 21, col);
 }
 
 /* The status bar lives above the image and is never repainted by the blast,
