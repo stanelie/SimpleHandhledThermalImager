@@ -104,11 +104,14 @@ static void draw_overlay_test(void){
     g_fv=1; g_fh=1;
 }
 
-extern int nuc_busy(void);
+extern int view_mode;
 
 static void draw_crosshair(void){
     int cy = img_h/2;
-    uint16_t col = nuc_busy() ? C_RED : C_WHITE;   /* red while flat-field calibrating */
+    /* crosshair colour reports the view mode */
+    uint16_t col = (view_mode==1) ? RGB(255,255,0)      /* raw: no interp, no filter */
+                 : (view_mode==2) ? RGB(255,80,255)     /* interp only, no filter    */
+                                  : C_WHITE;            /* normal                    */
     fill_rect(LCD_W/2-10, cy-1, 21, 2, col);
     fill_rect(LCD_W/2-1,  cy-10, 2, 21, col);
 }

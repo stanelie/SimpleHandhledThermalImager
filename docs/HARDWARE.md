@@ -178,7 +178,14 @@ share one pin, distinguished by voltage:
 |---|---|
 | 4095 | idle |
 | 2045 | middle button -> toggles the OSD |
-| 0 | second button -> runs a flat-field calibration |
+| 0 | second button -> cycles the view mode |
+
+> The ADC's first conversions after calibration read **0**, which decodes
+> identically to the 0-level button being held. Enough of them in a row satisfied
+> the debounce and fired a button action at every boot. Ignore the button until
+> the ADC is known good (`iters < 15`), or a mode silently toggles on startup --
+> this went unnoticed for a while because the action it triggered was a
+> calibration whose effect was hard to see.
 
 PA0 is also analog but sits constant at ~3201 (~2.58 V) and never moves — it is
 almost certainly a **battery monitor**, not an input.

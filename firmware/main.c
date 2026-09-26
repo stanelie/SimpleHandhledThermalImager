@@ -41,6 +41,8 @@
 #define SRC_W 32
 #define SRC_H 24
 #define MLX_ADDR 0x33
+#define NOISE_SHIFT_MAX 4  /* quiet-pixel averaging: 2^4 frames, ~5.6x noise reduction */
+#define SPAN_MIN 52        /* minimum displayed span in raw counts (~6 degC) */
 
 volatile uint32_t dbg[24];
 static int16_t  frame[834];
@@ -60,6 +62,16 @@ static int img_h = LCD_H-BAR_H;
 #define GPIOB_BSRR  REG(0x40010C10)
 #define GPIOC_BSRR2 REG(0x40011010)
 static int overlay_on = 1;
+/* View mode, cycled by the second button. Lets processing artefacts be told
+ * apart from sensor behaviour. Gain/offset calibration stays on in every mode --
+ * without it the EEPROM fixed-pattern swamps everything and you learn nothing.
+ *   0 = interpolation + temporal filter   (normal; crosshair white)
+ *   1 = neither: raw 10x10 blocks         (the sensor as-is; crosshair yellow)
+ *   2 = interpolation only, no filter     (isolates the filter; crosshair magenta)
+ */
+int view_mode = 0;
+#define VIEW_INTERP  (view_mode != 1)
+#define VIEW_FILTER  (view_mode == 0)
 static uint32_t bus_hi = 0xFC00u;
 static int cur_pair = 0;
 
@@ -315,6 +327,7 @@ static void extract_offsets(void){
 static int32_t acc[768];
 static int acc_primed;
 static int32_t noise_est = 4000;      /* fixed point <<8 */
+static int16_t trend[768];            /* EMA of the SIGNED delta, scaled >>4 */
 volatile uint32_t dbg_noise;
 
 /* A/B test of the MLX90640 ADC resolution (0x800D bits 11:10).
@@ -329,12 +342,31 @@ static void denoise(void){
         acc_primed=1;
         return;
     }
-    int32_t t_hi=noise_est*4, t_mid=noise_est*2, sumd=0;
+    /* Thresholds are multiples of the mean ABSOLUTE deviation, and MAD ~ 0.8*sigma.
+     * At 2x/4x MAD (1.6/3.2 sigma) noise alone crossed the lower threshold ~11% of
+     * the time, so one pixel in nine fell to the barely-filtered path every frame
+     * -- the filter was mistaking its own noise for motion, which is what the
+     * sparkle was. 3x/6x MAD (2.4/4.8 sigma) is crossed by noise far more rarely. */
+    int32_t t_hi=noise_est*6, t_mid=noise_est*3, sumd=0;
+    int32_t t_trend=(noise_est>>4)*2;   /* lower = faster response, slightly more noise through */
     for(int i=0;i<768;i++){
         int32_t d=((int32_t)frame[i]<<8) - acc[i];
         int32_t ad = d<0 ? -d : d;
         sumd += ad;
-        int sh = (ad>t_hi) ? 0 : (ad>t_mid) ? 1 : 3;
+        /* Noise is zero-mean and flips sign frame to frame, so it averages to
+         * nothing here; a genuine change keeps the same sign and accumulates.
+         * That separates a small persistent change from noise of the same
+         * magnitude, which a per-frame threshold cannot do -- and it is why the
+         * heavy averaging no longer costs a second of settling. */
+        int32_t tr = trend[i];
+        tr += ((d>>4) - tr) >> 1;   /* short EMA: detects persistence in fewer frames */
+        trend[i] = (int16_t)tr;
+
+        int sh;
+        if(ad > t_hi)                        sh = 0;   /* big jump: track at once */
+        else if(tr > t_trend || tr < -t_trend) sh = 1; /* persistent drift: track fast */
+        else if(ad > t_mid)                  sh = 2;
+        else                                 sh = NOISE_SHIFT_MAX;
         acc[i] += d>>sh;
         frame[i] = (int16_t)(acc[i]>>8);
     }
@@ -355,8 +387,6 @@ static void denoise(void){
  * each pixel's deviation. High-passed against a 3x3 local mean so a target that
  * isn't perfectly flat (or lens vignetting) is not baked in. Applied
  * incrementally, so repeated calibrations converge. */
-volatile int32_t  avg_acc[768];
-volatile uint32_t avg_n;
 
 #ifdef DIAG
 /* Characterise the sensor with the display pipeline out of the way.
@@ -370,31 +400,7 @@ volatile int32_t  d_sum[768];
 volatile int32_t  d_sumsq[768];
 volatile uint32_t d_n, d_cfg;
 #endif
-static int16_t nuc[768];
-static int nuc_cnt;                 /* >0 while capturing */
-int nuc_busy(void){ return nuc_cnt>0; }
 
-static void nuc_start(void){
-    for(int i=0;i<768;i++) avg_acc[i]=0;
-    nuc_cnt=32;
-}
-static void nuc_step(void){
-    for(int i=0;i<768;i++) avg_acc[i]+=frame[i];
-    if(--nuc_cnt) return;
-    for(int r=0;r<SRC_H;r++){
-        for(int c=0;c<SRC_W;c++){
-            int i=r*SRC_W+c;
-            int32_t sum=0, n=0;
-            for(int rr=(r?r-1:0); rr<=(r<SRC_H-1?r+1:r); rr++)
-                for(int cc=(c?c-1:0); cc<=(c<SRC_W-1?c+1:c); cc++){
-                    sum+=avg_acc[rr*SRC_W+cc]; n++;
-                }
-            int32_t d = (avg_acc[i] - sum/n)/32;     /* high-pass, /32 frames */
-            int32_t v = nuc[i] + d;
-            nuc[i]=(int16_t)(v>4000?4000:(v<-4000?-4000:v));
-        }
-    }
-}
 
 
 
@@ -405,7 +411,7 @@ static void correct_frame(void){
      * fallback multiplied every pixel by ~6200 and saturated the frame */
     int32_t gfp = lg_gfp;
     for(int i=0;i<768;i++){
-        int32_t v=(((int32_t)frame[i]*gfp)>>10) - poff[i] - nuc[i];
+        int32_t v=(((int32_t)frame[i]*gfp)>>10) - poff[i];
         frame[i]=(int16_t)(v>32767?32767:(v<-32768?-32768:v));
     }
 }
@@ -437,9 +443,23 @@ static void render_prep(void){
     if(!scale_primed){ mn_s=mn; mx_s=mx; scale_primed=1; }
     else { mn_s += ((int32_t)mn-mn_s)>>2; mx_s += ((int32_t)mx-mx_s)>>2; }
 
-    int32_t span = mx_s-mn_s; if(span<1) span=1;
+    /* Don't stretch a span smaller than the thermal detail actually present.
+     * Measured: a flat scene gives ~31 counts (~3.6 C) of span, and spreading
+     * that over 256 palette entries magnifies ~2 counts of residual noise into
+     * a visible 5-20% of the colour range. Below the floor, expand symmetrically
+     * about the midpoint: less contrast on genuinely flat scenes, which is
+     * honest, and far less amplified noise. ~8.6 counts per degC on this unit. */
+    int32_t lo_d=mn_s, hi_d=mx_s;
+    int32_t span = hi_d-lo_d;
+    if(span < SPAN_MIN){
+        int32_t mid=(hi_d+lo_d)/2;
+        lo_d = mid - SPAN_MIN/2;
+        hi_d = mid + SPAN_MIN/2;
+        span = SPAN_MIN;
+    }
+    if(span<1) span=1;
     r_inv10 = (255*65536)/span;
-    r_base10 = mn_s;
+    r_base10 = lo_d;
 }
 
 /* Render one horizontal band, so overlays can be drawn immediately after the
@@ -455,7 +475,7 @@ static void render_band(int Y0,int Y1){
         uint32_t vpos = (uint32_t)(Y-IMG_Y0)*vstep;
         int sy = (int)(vpos>>16);
         if(sy>SRC_H-1) sy=SRC_H-1;
-        int wy1 = (int)((vpos>>8)&0xFF), wy0 = 256-wy1;
+        int wy1 = VIEW_INTERP ? (int)((vpos>>8)&0xFF) : 0, wy0 = 256-wy1;
         const int16_t *r0=&frame[sy*SRC_W];
         const int16_t *r1=&frame[(sy<SRC_H-1?sy+1:sy)*SRC_W];
         uint8_t idxc[SRC_W+1];
@@ -468,9 +488,14 @@ static void render_band(int Y0,int Y1){
 
         for(int sx=0; sx<SRC_W; sx++){
             int a = idxc[sx], b = idxc[sx+1];
-            for(int fx=0; fx<10; fx++){
-                int k = (a*(10-fx) + b*fx) * 3277 >> 15;   /* /10 */
-                px_fast(pal[k]);
+            if(!VIEW_INTERP){
+                uint16_t c = pal[a];
+                for(int fx=0; fx<10; fx++) px_fast(c);
+            } else {
+                for(int fx=0; fx<10; fx++){
+                    int k = (a*(10-fx) + b*fx) * 3277 >> 15;   /* /10 */
+                    px_fast(pal[k]);
+                }
             }
         }
     }
@@ -573,12 +598,18 @@ int main(void){
         adcnow[0]=adc_read(0); adcnow[1]=adc_read(1);
         {   uint32_t lv=adcnow[1];
             int b = (lv<1000)?2 : (lv<3000)?1 : 0;
-            static int raw=-1, cnt=0, stable=0;
+            /* The ADC's first conversions read 0 before it settles, which decodes
+             * identically to the second button being held -- enough of them in a
+             * row satisfied the debounce and toggled a mode at every boot. Ignore
+             * the button until the ADC is known good. 'stable=-1' also means the
+             * first settled reading is adopted rather than treated as a change. */
+            static int raw=-1, cnt=0, stable=-1;
+            if(iters < 15) b = stable = -1;
             if(b==raw) cnt++; else { raw=b; cnt=0; }
             if(cnt>=2 && b!=stable){
                 stable=b;
                 if(b==1) overlay_on=!overlay_on;      /* 2045 level toggles overlay */
-                else if(b==2 && !nuc_cnt) nuc_start(); /* 0 level: flat-field calibrate */
+                else if(b==2) view_mode=(view_mode+1)%3;  /* 0 level: cycle view mode */
             }
         }
         bucket(0,adcnow[0]); bucket(1,adcnow[1]);
@@ -651,9 +682,8 @@ int main(void){
 
         dbg[14]=aux_rejects;
 
-        if(nuc_cnt) nuc_step();
 #ifndef DIAG
-        denoise();
+        if(VIEW_FILTER) denoise(); else acc_primed=0;
 #endif
 
         t=CYC;

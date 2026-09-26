@@ -21,6 +21,7 @@ describes how, and which approaches wasted time.
 | image | 32×24 nearest-neighbour, visible fixed-pattern noise | bilinear 10× upscale to 320×240, offset-calibrated, temporally denoised |
 | temperature | none displayed | min / centre / max in °C |
 | palette | fixed | 3 palettes + 4 gamma curves, switchable live |
+| diagnostics | — | view modes that disable interpolation and/or filtering, to separate sensor behaviour from processing |
 | USB / snapshots | yes | removed |
 
 The single biggest win was not code at all: **the stock firmware left the
@@ -40,7 +41,33 @@ ceiling, worth roughly another 2 fps.
 | middle button | toggle the OSD (when hidden, the image expands to the full 240 rows) |
 | wheel left / right | cycle palette: rainbow → ironbow → grayscale |
 | wheel push | cycle gamma: 4.0 → 3.0 → 2.0 → 1.5 (default 4.0) |
-| second button | flat-field calibration — point at a uniform surface and press; crosshair turns red for ~1.7 s |
+| second button | cycle view mode: interpolation+filter (white crosshair) → neither, raw 10×10 blocks (yellow) → interpolation only (magenta) |
+
+## Noise, and what actually helps
+
+The sensor's residual noise is **temporal**, not fixed. Measured: ~6.4 counts
+per frame against a displayed span that the auto-range had been shrinking to
+~31 counts, so noise occupied up to 20% of the colour range. Two things mattered:
+
+- **A minimum displayed span** (`SPAN_MIN`). Stretching a 31-count span across
+  256 palette entries magnifies noise enormously; refusing to stretch below
+  ~6 degC costs contrast only on scenes that have no detail to show anyway.
+- **Sign-persistence in the temporal filter.** Noise is zero-mean and flips sign
+  frame to frame; a real change does not. Tracking an EMA of the *signed* delta
+  separates a small persistent change from noise of the same magnitude, which a
+  per-frame magnitude threshold cannot. That allows 16-frame averaging on quiet
+  pixels without the ~1 s settling it would otherwise cost.
+
+Also fixed along the way: the magnitude thresholds were set at 2x/4x the mean
+absolute deviation, but MAD ~ 0.8 sigma, so noise alone crossed the lower one
+~11% of the time -- one pixel in nine escaped filtering every frame, which was
+itself the visible sparkle.
+
+A flat-field (NUC) correction was implemented and then **removed**: a
+two-pass reproducibility test showed the table collapsing 64% on the second
+capture, proving it was recording scene content rather than sensor structure.
+Without a mechanical shutter there is no uniform reference, and the residual
+fixed pattern turned out to be small anyway. It is in git history if wanted.
 
 ## Processing pipeline
 
