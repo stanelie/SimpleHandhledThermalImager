@@ -149,8 +149,17 @@ docs/         hardware map and reverse-engineering notes
   ladder and the wheel accounts for three more actions, but one switch was never
   located. The only unscanned pins left are the SPI-flash lines (PA4–PA7) and
   SWD (PA13/PA14), which can't be probed without losing the debug connection.
-- Emissivity is fixed at 0.95. Skin is nearer 0.98, so readings of skin come out
-  very slightly high — centre read 34.5 °C against a reference camera's 34 °C.
+- Emissivity is fixed at 0.95 and reflected temperature is assumed to be Ta−8.
+  Skin reads very slightly high (34.5 °C against a reference camera's 34 °C).
+- **Accuracy on small or cold targets is limited by spot size, not by the maths.**
+  Each pixel covers roughly 1.7°×1.5°, so a target that does not completely fill
+  a pixel is averaged with its background — and since radiance goes as T⁴ the
+  warmer part dominates. A −9 °C object partially filling the centre pixel in a
+  warm room reads around −4 °C. The MLX90640 is also only specified to about
+  ±2 °C over 0–100 °C, and degrades outside that.
+  The temperature chain itself has been verified: an independent double-precision
+  reimplementation of the full Melexis calculation, run on host from the same
+  EEPROM and raw frame, agrees with the firmware exactly (0.28 °C vs 0.28 °C).
 - The image is auto-ranged every frame between the 4th-coldest and 4th-hottest
   pixel, so contrast is relative, not absolute. There is no fixed-range mode yet.
 - Only the centre, min and max pixels are converted to °C. The image itself is

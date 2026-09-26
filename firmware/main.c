@@ -689,9 +689,12 @@ int main(void){
         t=CYC;
         render_prep();
         img_h = overlay_on ? (LCD_H-BAR_H) : LCD_H;
-        render_band(0, img_h/2-1);
+        /* the crosshair spans img_h/2 +/- 10, so the split must be below it or
+         * the next band repaints its lower half */
+        int cross_lo = img_h/2 + 11;
+        render_band(0, cross_lo-1);
         if(overlay_on) draw_crosshair();
-        render_band(img_h/2, img_h-1);
+        if(cross_lo <= img_h-1) render_band(cross_lo, img_h-1);
         if(overlay_on) draw_bar_if_changed();
         dbg[5]=CYC-t;
 
