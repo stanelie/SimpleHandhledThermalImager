@@ -66,7 +66,16 @@ still flash. Do **not** use `100` (disables both) — that costs you debug acces
 Byte protocol: assert CS low, put the byte on PB0–7, pulse WR low→high, release
 CS. Commands are identical but with RS low first.
 
-**The image is blasted in 12-bit colour (RGB444), the overlay in 16-bit.**
+**12-bit colour (RGB444) is available but OFF — it costs far more than it
+buys.** Measured against the reference palette, RGB444 yields **93 distinct
+colours where RGB565 yields 226**, and up to **six consecutive palette entries
+collapse to a single colour**. In the black→blue leg that carries a cold
+background it is 17 shades against 36. That is plainly visible: faint structure
+(a table against a floor) vanishes, and a warm object that should render as a
+green→orange→red gradient flattens into one green. It saves ~1.4 ms, which at
+20 fps did not even move the on-device frame counter. `COLOR12` in `main.c`.
+
+When it was enabled the format was:
 `COLMOD` (`0x3A`) is set to `0x03` at the top of `render_band()` and back to
 `0x05` when it releases CS. Two pixels pack into three bytes as
 `[R1G1][B1R2][G2B2]`, so the image costs 25% fewer bus bytes. With a 256-entry
