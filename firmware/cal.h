@@ -211,12 +211,12 @@ static void calc_frame_params(uint16_t ctrlReg, int subpage){
  * chain -- two of the three 4th roots, both divides after the first, and the
  * band selection -- a table indexed by Tk, rebuilt only when Ta moves.
  * Per pixel this leaves one divide, one 4th root and a lerp. */
-#define H_N    256
+#define H_N    64
 #define H_LO   180.0f
 #define H_STEP (440.0f/(float)(H_N-1))
 #define H_INV  ((float)(H_N-1)/440.0f)
 static float h_tab[H_N];
-static float h_built_taTr = -1e30f;
+static float h_built_ta = -1e30f;
 
 static void build_h_tab(void){
     const float k1=ksTo_[1], base=1.f-k1*273.15f;
@@ -234,7 +234,7 @@ static void build_h_tab(void){
         float W=acr[r]*(1.f+ksTo_[r]*(To2-(float)ct_[r]));
         h_tab[i] = (W!=0.f) ? (f4rt(u/W+f_taTr)-273.15f) : To2;
     }
-    h_built_taTr=f_taTr;
+    h_built_ta=f_ta; dbg[28]++;
 }
 
 /* Per-pixel constants, as scaled integers. alpha, kta and kv are fixed in the
@@ -253,12 +253,63 @@ static uint16_t t_iac[768];
 static float    t_iac_mul;
 static float    t_built_ta = -1e30f, t_built_vdd = -1e30f;
 
+/* Rebuilding all 768 entries at once costs ~18 ms, which lands as a visible
+ * stutter on the ~28% of frames where Ta has drifted a quarter degree. The
+ * constants are latched at the start of a pass so the table stays
+ * self-consistent, then 96 entries are built per frame -- a full refresh takes
+ * 8 frames (about half a second), during which Ta cannot have moved far. */
+static struct { float ktaTa,kvVdd,ksTaTerm,tgcCpA,invAlphaS,invKtaS1,invKvS,iac_ref; } pxb;
+static int px_cursor = -1;                 /* -1 = idle */
+
+static void px_tables_begin(void){
+    pxb.ktaTa=f_ta-25.f; pxb.kvVdd=f_vdd-3.3f;
+    pxb.ksTaTerm=1.f+KsTa_*pxb.ktaTa;
+    pxb.tgcCpA=tgc_*cpAlpha_[f_sub?1:0];
+    pxb.invAlphaS=p2(-alphaScale_);
+    pxb.invKtaS1=p2(-ktaScale1_);
+    pxb.invKvS=p2(-kvScale_);
+    float ac_ref=(alphaRef_*pxb.invAlphaS - pxb.tgcCpA)*pxb.ksTaTerm;
+    pxb.iac_ref=(ac_ref>0.f)?1.f/ac_ref:1.f;
+    t_iac_mul=pxb.iac_ref*(1.f/16384.f);
+    px_cursor=0;
+}
+
+static void px_tables_step(int n){
+    int end=px_cursor+n; if(end>768) end=768;
+    for(int p=px_cursor;p<end;p++){
+        int a=(ee[64+p]&0x03F0)>>4; if(a>31) a-=64;
+        float alpha=(alphaRef_ + (float)(accRow_[p>>5]<<accRowScale_)
+                               + (float)(accCol_[p&31]<<accColScale_)
+                               + (float)(a<<accRemScale_))*pxb.invAlphaS;
+        int sp=px_split(p);
+        int t=(ee[64+p]&0x000E)>>1; if(t>3) t-=8;
+        float kta=(float)(KtaRC_[sp]+(t<<ktaScale2_))*pxb.invKtaS1;
+        float kv =(float)KvRC_[sp]*pxb.invKvS;
+        float off=(float)poff[p]*(1.f+kta*pxb.ktaTa)*(1.f+kv*pxb.kvVdd)*16.f;
+        int32_t oq=(int32_t)(off<0.f ? off-0.5f : off+0.5f);
+        t_off[p]=(int16_t)(oq>32767?32767:(oq<-32768?-32768:oq));
+        float ac=(alpha-pxb.tgcCpA)*pxb.ksTaTerm;
+        float iac=(ac>0.f)? 1.f/ac : pxb.iac_ref;
+        int32_t q=(int32_t)((iac/pxb.iac_ref)*16384.f+0.5f);
+        t_iac[p]=(uint16_t)(q<0?0:(q>65535?65535:q));
+    }
+    px_cursor=end;
+    if(px_cursor>=768){ px_cursor=-1; t_built_ta=f_ta; t_built_vdd=f_vdd; dbg[28]++; }
+}
+
 static void build_px_tables(void){
     const float ktaTa=(f_ta-25.f), kvVdd=(f_vdd-3.3f);
     const float ksTaTerm=1.f+KsTa_*ktaTa;
     const float tgcCpA=tgc_*cpAlpha_[f_sub?1:0];
     const float invAlphaS=p2(-alphaScale_), invKtaS1=p2(-ktaScale1_), invKvS=p2(-kvScale_);
-    float iac[768], sum=0.f;
+    /* Scaling reference for the uint16 table. This must NOT be a mean computed
+     * into a temporary float[768]: that is 3 KB on a ~2.6 KB stack, and it
+     * overflowed into the top of bss on every rebuild. The reference only has
+     * to keep the quantised ratios inside uint16, so the EEPROM's nominal
+     * alpha serves, is deterministic, and needs no second pass. */
+    const float ac_ref  = (alphaRef_*invAlphaS - tgcCpA)*ksTaTerm;
+    const float iac_ref = (ac_ref > 0.f) ? 1.f/ac_ref : 1.f;
+    t_iac_mul = iac_ref*(1.f/16384.f);
     for(int p=0;p<768;p++){
         int a=(ee[64+p]&0x03F0)>>4; if(a>31) a-=64;
         float alpha=(alphaRef_ + (float)(accRow_[p>>5]<<accRowScale_)
@@ -276,13 +327,8 @@ static void build_px_tables(void){
         t_off[p]=(int16_t)(oq>32767?32767:(oq<-32768?-32768:oq));
 
         float ac=(alpha-tgcCpA)*ksTaTerm;
-        iac[p]=(ac>0.f)? 1.f/ac : 0.f;
-        sum+=iac[p];
-    }
-    float mean=sum/768.f;
-    t_iac_mul = mean*(1.f/16384.f);
-    for(int p=0;p<768;p++){
-        int32_t q=(int32_t)((iac[p]/mean)*16384.f+0.5f);
+        float iac=(ac>0.f)? 1.f/ac : iac_ref;
+        int32_t q=(int32_t)((iac/iac_ref)*16384.f+0.5f);
         t_iac[p]=(uint16_t)(q<0?0:(q>65535?65535:q));
     }
     t_built_ta=f_ta; t_built_vdd=f_vdd;
@@ -305,10 +351,21 @@ static void ref_convert_frame(void){
     const float invAlphaS = p2(-alphaScale_);
     const float invKtaS1  = p2(-ktaScale1_);
     const float invKvS    = p2(-kvScale_);
-    if(f_taTr!=h_built_taTr) build_h_tab();   /* only when Ta moves */
-    { float dt=f_ta-t_built_ta, dv=f_vdd-t_built_vdd;
-      if(dt<0)dt=-dt; if(dv<0)dv=-dv;
-      if(dt>0.25f || dv>0.01f) build_px_tables(); }
+    /* Ta jitters every frame, so an exact float compare here rebuilt the whole
+     * 256-entry table on 100% of frames -- measured, 130 rebuilds in 130 frames
+     * -- which defeated the point of caching it. The table maps Tk -> To through
+     * f_taTr, which moves slowly, so a quarter-degree tolerance is plenty. */
+    { float d=f_ta-h_built_ta; if(d<0) d=-d;
+      if(d>0.25f) build_h_tab(); }
+    if(t_built_ta < -1e29f){ build_px_tables(); }   /* first frame: all at once */
+    else{
+        if(px_cursor < 0){
+            float dt=f_ta-t_built_ta, dv=f_vdd-t_built_vdd;
+            if(dt<0)dt=-dt; if(dv<0)dv=-dv;
+            if(dt>0.25f || dv>0.01f) px_tables_begin();
+        }
+        if(px_cursor >= 0) px_tables_step(96);
+    }
     const int32_t gfp=(int32_t)(f_gain*16384.f);   /* 1/16 count units */
     const float   iemis=1.f/(emiss*16.f);
 

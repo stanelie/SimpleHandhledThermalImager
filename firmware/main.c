@@ -36,7 +36,7 @@
 #define PC14 (1u<<14)
 #define PC15 (1u<<15)
 
-#define COLOR12 0
+#define COLOR12 1
 #define LCD_W 320
 #define LCD_H 240
 #define SRC_W 32
@@ -762,6 +762,13 @@ static void render_prep(void){
     if(span<1) span=1;
     r_inv10 = (255*65536)/span;
     r_base10 = lo_d;
+    /* A whole-image colour flash has two possible causes: the pixel stream
+     * slipping, or the auto-range collapsing so every pixel lands on one
+     * palette entry. Count the latter so the two can be told apart rather
+     * than guessed at. */
+    { static int32_t prev_span = 0;
+      if(prev_span > 0 && (span > prev_span*3 || span*3 < prev_span)) dbg[27]++;
+      prev_span = span; }
 }
 
 /* Render one horizontal band, so overlays can be drawn immediately after the
@@ -1147,13 +1154,13 @@ int main(void){
         { uint32_t tp=CYC; render_prep(); dbg[25]=CYC-tp; }
         img_y0 = overlay_on ? TOP_H : 0;
         img_h  = overlay_on ? (LCD_H-BAR_H-TOP_H) : LCD_H;
-        /* the crosshair spans img_h/2 +/- 10, so the split must be below it or
-         * the next band repaints its lower half */
-        int cross_lo = img_y0 + img_h/2 + 11;
+        /* One band, then the crosshair on top. This used to be two bands with
+         * the crosshair drawn between them, so the second band would not
+         * repaint its lower half. Drawing it after the whole image is simpler,
+         * and halves the COLMOD switching when COLOR12 is on. */
         { uint32_t tb=CYC;
-          render_band(img_y0, cross_lo-1);
+          render_band(img_y0, img_y0+img_h-1);
           if(overlay_on) draw_crosshair();
-          if(cross_lo <= img_y0+img_h-1) render_band(cross_lo, img_y0+img_h-1);
           dbg[26]=CYC-tb; }
         draw_status_if_changed();
         if(overlay_on) draw_bar_if_changed();

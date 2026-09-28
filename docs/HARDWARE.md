@@ -72,6 +72,14 @@ CS. Commands are identical but with RS low first.
 `[R1G1][B1R2][G2B2]`, so the image costs 25% fewer bus bytes. With a 256-entry
 palette, 4096 colours loses nothing.
 
+**Switch `COLMOD` at most once per frame.** The image was originally drawn as
+two bands with the crosshair between them, which forced 12->16->12 bit per
+frame, and that produced intermittent whole-image colour flashes. Drawing the
+crosshair after a single full-height band fixed it and is simpler. If 12-bit
+ever misbehaves again, `dbg[27]` counts auto-range collapses, which is the other
+thing that can turn the whole image one colour -- check it before blaming the
+pixel format, as the two look identical on screen.
+
 **Do not expect DMA to help this bus.** Measured: the blast is 9.73 ms of
 per-pixel computation and 14.11 ms of bus, and the bus is 7.9 cycles per byte
 for *three* register writes -- `GPIOB_ODR`, `GPIOC_BRR` (WR low), `GPIOC_BSRR`
