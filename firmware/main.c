@@ -62,6 +62,27 @@
 
 #define NLO 39         /* 5th percentile of 768 = the 38th coldest, plus index 0 */
 #define SPAN_MIN 52        /* minimum displayed span in raw counts (~6 degC) */
+#if 1   /* smoothstep(fx/10)*256; the #else row is plain linear */
+#define W1 7
+#define W2 27
+#define W3 55
+#define W4 90
+#define W5 128
+#define W6 166
+#define W7 201
+#define W8 229
+#define W9 249
+#else
+#define W1 26
+#define W2 51
+#define W3 77
+#define W4 102
+#define W5 128
+#define W6 154
+#define W7 179
+#define W8 205
+#define W9 230
+#endif
 #define SHARP_INTERP 1     /* 1 = smoothstep interpolation weights, 0 = plain bilinear.
                             * At 10x magnification a linear ramp spreads every edge over
                             * 10 display pixels. Smoothstep (t^2*(3-2t)) concentrates the
@@ -737,12 +758,7 @@ static void render_band(int Y0,int Y1){
     GPIOA_BRR =PA3;
 
     const uint32_t vstep = ((uint32_t)SRC_H<<16)/(uint32_t)img_h;
-#if SHARP_INTERP
-    /* smoothstep(fx/10) * 256 */
-    static const uint16_t wx[10]={0,7,27,55,90,128,166,201,229,249};
-#else
-    static const uint16_t wx[10]={0,26,51,77,102,128,154,179,205,230};
-#endif
+
     for(int Y=Y0; Y<=Y1; Y++){
         uint32_t vpos = (uint32_t)(Y-IMG_Y0)*vstep;
         int sy = (int)(vpos>>16);
@@ -762,19 +778,25 @@ static void render_band(int Y0,int Y1){
         }
         idxc[SRC_W] = idxc[SRC_W-1];
 
+        /* a*(256-w) + b*w, all >>8, is algebraically a + ((b-a)*w >> 8): one
+         * multiply instead of two. Fully unrolled with the weights as literals,
+         * so there is no table load, no index arithmetic and no loop overhead
+         * on the hottest loop in the firmware -- 64640 iterations per frame. */
+#define BLEND(W) px_fast(pal[a + (((d*(W))>>8))])
         for(int sx=0; sx<SRC_W; sx++){
-            int a = idxc[sx], b = idxc[sx+1];
+            int a = idxc[sx];
             if(!VIEW_INTERP){
                 uint16_t c = pal[a];
-                for(int fx=0; fx<10; fx++) px_fast(c);
+                px_fast(c); px_fast(c); px_fast(c); px_fast(c); px_fast(c);
+                px_fast(c); px_fast(c); px_fast(c); px_fast(c); px_fast(c);
             } else {
-                for(int fx=0; fx<10; fx++){
-                    int w = wx[fx];
-                    int k = (a*(256-w) + b*w) >> 8;
-                    px_fast(pal[k]);
-                }
+                int d = (int)idxc[sx+1] - a;
+                px_fast(pal[a]);
+                BLEND(W1); BLEND(W2); BLEND(W3); BLEND(W4);
+                BLEND(W5); BLEND(W6); BLEND(W7); BLEND(W8); BLEND(W9);
             }
         }
+#undef BLEND
     }
     GPIOA_BSRR=PA3;            /* release CS */
 }
@@ -1090,15 +1112,17 @@ int main(void){
 #endif
 
         t=CYC;
-        render_prep();
+        { uint32_t tp=CYC; render_prep(); dbg[25]=CYC-tp; }
         img_y0 = overlay_on ? TOP_H : 0;
         img_h  = overlay_on ? (LCD_H-BAR_H-TOP_H) : LCD_H;
         /* the crosshair spans img_h/2 +/- 10, so the split must be below it or
          * the next band repaints its lower half */
         int cross_lo = img_y0 + img_h/2 + 11;
-        render_band(img_y0, cross_lo-1);
-        if(overlay_on) draw_crosshair();
-        if(cross_lo <= img_y0+img_h-1) render_band(cross_lo, img_y0+img_h-1);
+        { uint32_t tb=CYC;
+          render_band(img_y0, cross_lo-1);
+          if(overlay_on) draw_crosshair();
+          if(cross_lo <= img_y0+img_h-1) render_band(cross_lo, img_y0+img_h-1);
+          dbg[26]=CYC-tb; }
         draw_status_if_changed();
         if(overlay_on) draw_bar_if_changed();
         dbg[5]=CYC-t;
