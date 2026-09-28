@@ -687,9 +687,16 @@ static void render_prep(void){
         if(v<lo[NLO-1]){ int k=NLO-1; while(k>0 && v<lo[k-1]){ lo[k]=lo[k-1]; k--; } lo[k]=v; }
         if(v>hi[3]){ int k=3; while(k>0 && v>hi[k-1]){ hi[k]=hi[k-1]; k--; } hi[k]=v; }
     }
-    int16_t mn=lo[3], mx=hi[3];
-    mn_i=mn; mx_i=mx;
-    for(int i=0;i<768;i++){ if(frame[i]==mn) min_idx=i; else if(frame[i]==mx) max_idx=i; }
+    /* Two different jobs, two different answers.
+     * The auto-RANGE uses the trimmed extremes, because one spiked pixel really
+     * would wreck the image scaling.
+     * The LABELS use the true extremes. Reporting the 4th-hottest pixel as "max"
+     * meant that aiming the crosshair at a hot spot covering three pixels or
+     * fewer showed a centre reading ABOVE the maximum, which is incoherent. The
+     * trim was never what protected against the old ~80 degC jumps anyway --
+     * those came from corrupted gain/Ta words that scale every pixel, and
+     * calc_frame_params' range validation is what fixes those. */
+    int16_t mn=lo[3], mx=hi[3];              /* trimmed -> auto-range only */
 
     /* measure the checkerboard: mean of each chess-pattern subpage class */
     int32_t s0=0,s1=0;
@@ -1107,6 +1114,22 @@ int main(void){
         mlx_write(0x8000,0x0030);
 
         calc_frame_params(ctrl, st & 1);
+        /* Locate this frame's hottest and coldest pixels BEFORE correct_frame,
+         * while the raw values mlx_to() needs are still present, by computing
+         * what the correction will produce without storing it. Taking them from
+         * render_prep instead meant the labels used the PREVIOUS frame's
+         * indices, so the centre could read hotter than the maximum -- three
+         * numbers sampled from three different moments. */
+        if(!ref_pipe){
+            int32_t gfp2=lg_gfp, mv=2147483647, xv=-2147483647-1;
+            for(int p=0;p<768;p++){
+                int32_t v=(((int32_t)frame[p]*gfp2)>>10) - poff[p];
+                if(v<mv){ mv=v; min_idx=p; }
+                if(v>xv){ xv=v; max_idx=p; }
+            }
+            mn_i=(int16_t)mv; mx_i=(int16_t)xv;
+        }
+
         /* The reference pipeline must convert BEFORE the labels are taken, or
          * they get recomputed from raw against indices belonging to the
          * previous frame -- which is how min ended up reading above max. */
