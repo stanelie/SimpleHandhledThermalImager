@@ -172,6 +172,7 @@ static int scan_wheel(void){
 volatile uint32_t adcbuk[2][8][2];
 volatile uint32_t adcnow[2];
 static uint16_t pal[256];
+static uint16_t pal12[256];
 static uint8_t  gam[256];
 
 static uint32_t adc_read(int ch);
@@ -364,6 +365,9 @@ static void pal_init(void){
             else           { int u=i-216; r=255;          g=255-(u*255)/39; b=0; }
         }
         pal[i]=(uint16_t)(((r&0xF8)<<8)|((g&0xFC)<<3)|(b>>3));
+        /* RGB444 for the image blast: 4096 colours against a 256-entry palette,
+         * so nothing is lost, and it is 3 bus bytes per 2 pixels instead of 4 */
+        pal12[i]=(uint16_t)(((r&0xF0)<<4)|(g&0xF0)|(b>>4));
     }
     for(int i=0;i<256;i++){
         uint32_t c2=(uint32_t)i*(uint32_t)i;
@@ -380,6 +384,15 @@ static void pal_init(void){
 }
 
 /* bulk pixel write: CS and RS/DC are hoisted out of the loop by the caller */
+static inline void wr8(uint8_t b){
+    GPIOB_ODR=0xFC00u|b; GPIOC_BRR=PC15; GPIOC_BSRR=PC15;
+}
+/* two RGB444 pixels in three bytes: [R1G1][B1R2][G2B2] */
+static inline void px_pair(uint16_t c1,uint16_t c2){
+    wr8((uint8_t)(c1>>4));
+    wr8((uint8_t)(((c1&0xFu)<<4)|(c2>>8)));
+    wr8((uint8_t)c2);
+}
 static inline void px_fast(uint16_t v){
     GPIOB_ODR=0xFC00u|(uint8_t)(v>>8); GPIOC_BRR=PC15; GPIOC_BSRR=PC15;
     GPIOB_ODR=0xFC00u|(uint8_t)v;      GPIOC_BRR=PC15; GPIOC_BSRR=PC15;
@@ -754,6 +767,7 @@ static void render_prep(void){
  * rows beneath them are painted. Drawing them all at the end meant the blast
  * erased them for most of each frame -- that was the every-other-frame flicker. */
 static void render_band(int Y0,int Y1){
+    lcd_cmd(0x3A); lcd_dat(0x03);        /* COLMOD: 12 bit/px for the image */
     lcd_window(0,LCD_W-1,(uint16_t)Y0,(uint16_t)Y1);
     GPIOA_BSRR=PA2;
     GPIOA_BRR =PA3;
@@ -783,23 +797,25 @@ static void render_band(int Y0,int Y1){
          * multiply instead of two. Fully unrolled with the weights as literals,
          * so there is no table load, no index arithmetic and no loop overhead
          * on the hottest loop in the firmware -- 64640 iterations per frame. */
-#define BLEND(W) px_fast(pal[a + (((d*(W))>>8))])
+#define B12(W) pal12[a + (((d*(W))>>8))]
         for(int sx=0; sx<SRC_W; sx++){
             int a = idxc[sx];
             if(!VIEW_INTERP){
-                uint16_t c = pal[a];
-                px_fast(c); px_fast(c); px_fast(c); px_fast(c); px_fast(c);
-                px_fast(c); px_fast(c); px_fast(c); px_fast(c); px_fast(c);
+                uint16_t c = pal12[a];
+                px_pair(c,c); px_pair(c,c); px_pair(c,c); px_pair(c,c); px_pair(c,c);
             } else {
                 int d = (int)idxc[sx+1] - a;
-                px_fast(pal[a]);
-                BLEND(W1); BLEND(W2); BLEND(W3); BLEND(W4);
-                BLEND(W5); BLEND(W6); BLEND(W7); BLEND(W8); BLEND(W9);
+                px_pair(pal12[a], B12(W1));
+                px_pair(B12(W2),  B12(W3));
+                px_pair(B12(W4),  B12(W5));
+                px_pair(B12(W6),  B12(W7));
+                px_pair(B12(W8),  B12(W9));
             }
         }
-#undef BLEND
+#undef B12
     }
     GPIOA_BSRR=PA3;            /* release CS */
+    lcd_cmd(0x3A); lcd_dat(0x05);        /* back to 16 bit/px for the overlay */
 }
 
 #include "gfx.h"

@@ -18,6 +18,24 @@ crystal is 12 MHz.
 > Firmware that does not configure the PLL boots at 8 MHz on the internal RC and
 > is **9× slower**. This is easy to miss.
 
+**This unit will not run above 72 MHz.** The GD32F103 family is specified to
+108 MHz, and `FLASH_ACR` already carries `LATENCY=2` + prefetch, which GD32
+specifies for 64-108 MHz -- so both 108 MHz (`PLLXTPRE=0, PLLMUL=9`,
+`RCC_CFG0 = 0x081d0402`) and 96 MHz (`PLLMUL=8`, `0x08190402`) were tried. Both
+**fail**, and they fail in a specific way worth recognising:
+
+- the PLL locks and the switch succeeds -- `RCC_CTL` shows `PLLRDY`, and
+  `RCC_CFG0` reads back `SWS = 10` (PLL). The clock tree is fine.
+- but the core ends up with `pc` **inside a literal pool** (0x080003e2, in the
+  middle of `pal_init`'s constants), i.e. executing data. That is flash reads
+  failing, not a clock configuration error.
+
+So do not diagnose this by checking whether the PLL locked; it does. Recovery is
+a normal `reset halt` reflash at 72 MHz.
+
+Anything that scales with the core clock -- and the whole image pipeline does --
+is therefore capped at 72 MHz on this hardware.
+
 ## THE trap: PB3/PB4 are JTAG pins
 
 After reset, **PA13, PA14, PA15, PB3 and PB4 belong to the JTAG peripheral**, not
@@ -47,6 +65,23 @@ still flash. Do **not** use `100` (disables both) — that costs you debug acces
 
 Byte protocol: assert CS low, put the byte on PB0–7, pulse WR low→high, release
 CS. Commands are identical but with RS low first.
+
+**The image is blasted in 12-bit colour (RGB444), the overlay in 16-bit.**
+`COLMOD` (`0x3A`) is set to `0x03` at the top of `render_band()` and back to
+`0x05` when it releases CS. Two pixels pack into three bytes as
+`[R1G1][B1R2][G2B2]`, so the image costs 25% fewer bus bytes. With a 256-entry
+palette, 4096 colours loses nothing.
+
+**Do not expect DMA to help this bus.** Measured: the blast is 9.73 ms of
+per-pixel computation and 14.11 ms of bus, and the bus is 7.9 cycles per byte
+for *three* register writes -- `GPIOB_ODR`, `GPIOC_BRR` (WR low), `GPIOC_BSRR`
+(WR high) -- about 2.6 cycles per store, near optimal for buffered peripheral
+writes. DMA cannot beat it: the data is on GPIOB and WR is on GPIOC, so one
+channel cannot carry both, and `BSRR` cannot make a pulse in a single write
+because set wins over reset. That forces **three DMA channels per byte**, each
+costing more than a CPU store, so DMA would be roughly twice as slow. It also
+needs ~2.5 KB of double-buffered rows that do not exist. DMA wins when one
+request moves a lot of data; here it is three register pokes per byte.
 
 CS and RS **do not** need toggling per byte during a bulk pixel blast — hoisting
 them out of the loop roughly halves render time and the panel accepts it.
