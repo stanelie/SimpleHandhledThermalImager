@@ -880,6 +880,7 @@ int main(void){
     dbg[14]=mlx_read(0x2400, ee, 832);
     extract_offsets();
     extract_cal();
+    f4rt_init();
     build_alpha_rcp();
     dbg[15]=(uint32_t)gainEE;
     mlx_write(0x8000,0x0030);
