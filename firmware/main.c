@@ -49,7 +49,7 @@
  * is ~1.5x quieter for the same latency -- the 1.67x noise penalty outweighs
  * the 1.17x extra frames. 64 Hz also reinstates the aux-word corruption that
  * 32 Hz eliminated (0 rejects over 442 frames vs a handful per thousand). */
-#define REFRESH_SEL 7
+#define REFRESH_SEL 6   /* boot at 32 Hz */
 
 /* Temporal filter: 1 = rolling box window (FIR), 0 = adaptive EMA (IIR).
  * The box is FIR, so a frame leaves the average completely after TFILT_N frames
@@ -120,15 +120,16 @@ static int overlay_on = 1;
  *   1 = neither: raw 10x10 blocks         (the sensor as-is; crosshair yellow)
  *   2 = interpolation only, no filter     (isolates the filter; crosshair magenta)
  */
-int view_mode = 0;
+int view_mode = 2;   /* interpolation, no temporal filter */
 #define VIEW_INTERP  (view_mode != 1)
 #define VIEW_FILTER  (view_mode == 0)
 #define VIEW_DDE     (dde_on)
 /* V: 0 = interp+filter, 1 = raw 10x10 blocks, 2 = interp only.
  * DDE and the filter length are separate fields now, so any combination is
  * reachable from the wheel rather than being encoded into the view mode. */
-static int dde_on    = 1;
-static int tfilt_n   = TFILT_MAX;
+static int dde_on    = 0;
+static int tfilt_n   = 1;   /* 1 = no averaging; the box filter is the
+                             * identity at n=1, so V0 and V2 are then equal */
 static int refresh64 = (REFRESH_SEL == 7);
 static int sel       = 0;   /* which status field the wheel adjusts: P V G B D H R */
 #define SEL_N 7
