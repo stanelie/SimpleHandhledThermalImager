@@ -110,18 +110,6 @@ static int fmt_temp(int32_t centi, int8_t *out){
     return n;
 }
 
-static void draw_overlay_test(void){
-    static const int8_t s123[]={1,2,3,-1};
-    for(int v=0; v<2; v++)
-        for(int h=0; h<2; h++){
-            int row=v*2+h;
-            g_fv=v; g_fh=h;
-            /* row marker: that many bars on the far left */
-            for(int k=0;k<=row;k++) fill_rect(4+k*5, 40+row*30, 3, 12, C_WHITE);
-            draw_glyphs(30, 40+row*30, s123, C_WHITE, C_BLACK);
-        }
-    g_fv=1; g_fh=1;
-}
 
 extern int view_mode;
 

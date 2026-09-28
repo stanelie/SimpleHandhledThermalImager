@@ -142,7 +142,6 @@ static int sel       = 0;   /* which status field the wheel adjusts: P V G B D H
  * is fine: it exists to answer whether the per-pixel radiometry is what makes
  * his image look different, not to be shipped. */
 static int ref_pipe = 0;
-static uint32_t bus_hi = 0xFC00u;
 static int cur_pair = 0;
 
 static void delay_us(uint32_t us);
@@ -450,12 +449,11 @@ static int hist_pos=0, hist_fill=0;
 #else
 static int32_t acc[768];
 #endif
+#if !FILTER_BOX
 static int acc_primed;
 static int32_t noise_est = 4000;      /* fixed point <<8 */
-#if !FILTER_BOX
 static int16_t trend[768];            /* EMA of the SIGNED delta, scaled >>4 */
 #endif
-volatile uint32_t dbg_noise;
 
 /* A/B test of the MLX90640 ADC resolution (0x800D bits 11:10).
  * Raw counts scale with resolution, so absolute noise is not comparable --
@@ -511,7 +509,6 @@ static void denoise(void){
     }
     noise_est += ((sumd/768) - noise_est)>>3;
     if(noise_est<256) noise_est=256;
-    dbg_noise=(uint32_t)noise_est;
 }
 #endif
 
@@ -697,13 +694,6 @@ static void render_prep(void){
      * those came from corrupted gain/Ta words that scale every pixel, and
      * calc_frame_params' range validation is what fixes those. */
     int16_t mn=lo[3], mx=hi[3];              /* trimmed -> auto-range only */
-
-    /* measure the checkerboard: mean of each chess-pattern subpage class */
-    int32_t s0=0,s1=0;
-    for(int r=0;r<SRC_H;r++)
-        for(int c=0;c<SRC_W;c++)
-            { int16_t v2=frame[r*SRC_W+c]; if(((r+c)&1)==0) s0+=v2; else s1+=v2; }
-    dbg[12]=(uint32_t)(s0/384); dbg[13]=(uint32_t)(s1/384);
 
     /* Smooth the auto-range so one bad word can't wash out a whole frame. */
     if(!scale_primed){ mn_s=mn; mx_s=mx; scale_primed=1; }
@@ -1027,7 +1017,6 @@ int main(void){
               fps_disp = (int)((fps_n*72000000u)/dt);
               fps_n=0; fps_t0=CYC;
           } }
-        /* latch any spare input seen low -- press each control and I'll read these */
         adcnow[0]=adc_read(0); adcnow[1]=adc_read(1);
         {   uint32_t lv=adcnow[1];
             int b = (lv<1000)?2 : (lv<3000)?1 : 0;
@@ -1046,7 +1035,6 @@ int main(void){
             }
         }
         bucket(0,adcnow[0]); bucket(1,adcnow[1]);
-        dbg[20] |= (~GPIOA_IDR) & ((1u<<10)|(1u<<11)|(1u<<12));
         {   /* measured settled codes on this unit: 3=left 6=right 5=push */
             cur_pair = scan_wheel();
             int act = (cur_pair==3)?1 : (cur_pair==6)?2 : (cur_pair==5)?3 : 0;
@@ -1080,9 +1068,7 @@ int main(void){
                     }
                 }
             }
-            dbg[21]=(uint32_t)cur_pair;
         }
-        dbg[22] |= (~GPIOC_IDR) & (1u<<13);
 
         /* wait for data-ready, but never forever */
         uint32_t tw=CYC; uint16_t st=0; int ok=0;
@@ -1160,7 +1146,7 @@ int main(void){
         }
         dbg[16]=(uint32_t)tc; dbg[17]=(uint32_t)tn; dbg[18]=(uint32_t)tx;
         dbg[19]=(uint32_t)(int32_t)(f_ta*100.f);
-        /* mn_s/mx_s are those same two pixels in counts, so their ratio to the
+        /* mn_i/mx_i are those same two pixels in counts, so their ratio to the
          * temperature difference is the scale factor -- no constant needed. */
         /* Needs real thermal contrast to be well-conditioned: it is a ratio, and
          * on a near-uniform scene the denominator is mostly noise. A 2 degC

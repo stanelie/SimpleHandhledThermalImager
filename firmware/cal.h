@@ -344,13 +344,7 @@ static void ref_convert_frame(void){
     const float ktaTa=(f_ta-25.f), kvVdd=(f_vdd-3.3f);
     const float cpo = cpOffset_[f_sub?1:0]*(1.f+cpKta_*ktaTa)*(1.f+cpKv_*kvVdd);
     const float irCP = (float)(int16_t)frame[f_sub?808:776]*f_gain - cpo;
-    const float inv_emiss = 1.f/emiss;
-    const float ksTaTerm  = 1.f+KsTa_*ktaTa;
-    const float tgcCpA    = tgc_*cpAlpha_[f_sub?1:0];
     const float tgcIrCP   = tgc_*irCP;
-    const float invAlphaS = p2(-alphaScale_);
-    const float invKtaS1  = p2(-ktaScale1_);
-    const float invKvS    = p2(-kvScale_);
     /* Ta jitters every frame, so an exact float compare here rebuilt the whole
      * 256-entry table on 100% of frames -- measured, 130 rebuilds in 130 frames
      * -- which defeated the point of caching it. The table maps Tk -> To through
