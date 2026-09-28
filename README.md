@@ -17,7 +17,7 @@ describes how, and which approaches wasted time.
 
 | | stock | this firmware |
 |---|---|---|
-| frame rate | 4 fps | **16.2 fps** (19 fps at 64 Hz; 32 Hz was chosen for image quality) |
+| frame rate | 4 fps | **20-21 fps** measured on-device (17 fps with full per-pixel radiometry) |
 | image | 32×24 nearest-neighbour, visible fixed-pattern noise | bilinear 10× upscale to 320×240, gain/offset/**per-pixel sensitivity** corrected, temporally denoised |
 | temperature | none displayed | min / centre / max in °C |
 | palette | fixed | 4 palettes × 5 gamma curves, switchable live |
@@ -30,7 +30,15 @@ system clock (the stock image runs the PLL at 72 MHz; naive firmware boots at
 8 MHz on the internal RC) accounts for most of the improvement. The remaining
 gains came from the render loop.
 
-Measured budget per frame at 19 fps: **I2C read 23.8 ms, render 28.6 ms.**
+Per-frame budget: **I2C read 18.1 ms, render 22.6 ms**, plus ~9 ms of
+everything else -- `correct_frame`, `calc_frame_params`, the three `mlx_to`
+calls behind the OSD labels, and the control scan.
+
+> Those two stage timers do **not** add up to the frame period, and treating
+> them as if they did overstated the frame rate by about 20% for a long time.
+> `fps_disp`, shown at the right of the status bar, counts whole loop
+> iterations against `DWT_CYCCNT` over a one-second window and is the number to
+> trust.
 The bus still has headroom — it runs at 731 kHz against the MLX90640's 1 MHz
 ceiling, worth roughly another 2 fps.
 

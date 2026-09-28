@@ -861,6 +861,24 @@ static int st_field(int x,int idx,int8_t lead,const int8_t *d,int nd){
     return x + glyphs_w(g) + GW;
 }
 
+static int fps_disp = 0;
+static int fps_dirty = 1;
+
+/* Right-aligned in the status bar. The bar sits above the image, so nothing
+ * repaints over it and this only runs when the number actually changes. */
+static void draw_fps_if_changed(void){
+    static int l_f=-1, l_on=-1;
+    if(!fps_dirty && fps_disp==l_f && overlay_on==l_on) return;
+    fps_dirty=0; l_f=fps_disp; l_on=overlay_on;
+    if(!overlay_on) return;
+    int v=fps_disp; if(v>99) v=99; if(v<0) v=0;
+    int8_t g[4]; int n=0;
+    if(v>=10) g[n++]=(int8_t)(v/10);
+    g[n++]=(int8_t)(v%10);
+    g[n]=-1;
+    draw_glyphs(LCD_W-4-glyphs_w(g), 2, g, C_CYAN, C_BLACK);
+}
+
 static void draw_status_if_changed(void){
     static int l_p=-1,l_v=-1,l_g=-1,l_on=-1,l_b=-1,l_d=-1,l_h=-1,l_s=-1,l_r=-1;
     if(pal_id==l_p && view_mode==l_v && gamma_id==l_g && overlay_on==l_on
@@ -870,6 +888,7 @@ static void draw_status_if_changed(void){
     l_b=tfilt_n; l_d=dde_on; l_h=refresh64; l_s=sel; l_r=ref_pipe;
 
     fill_rect(0,0,LCD_W,TOP_H,C_BLACK);
+    fps_dirty=1;              /* the wipe took the fps with it */
     if(!overlay_on) return;
 
     static const int8_t gdig[5][3] = {{4,GL_DOT,0},{3,GL_DOT,0},{2,GL_DOT,0},
@@ -992,6 +1011,15 @@ int main(void){
     int32_t sum_c=0, sum_n=0, sum_x=0; uint32_t nsamp=0, t_lbl=CYC; int primed=0;
     while(1){
         dbg[2]=++iters;
+        /* Measured, not derived from the stage timers: count whole loop
+         * iterations against DWT cycles over a one-second window. */
+        { static uint32_t fps_t0=0; static uint32_t fps_n=0;
+          fps_n++;
+          uint32_t dt=CYC-fps_t0;
+          if(dt >= 72000000u){                    /* one second at 72 MHz */
+              fps_disp = (int)((fps_n*72000000u)/dt);
+              fps_n=0; fps_t0=CYC;
+          } }
         /* latch any spare input seen low -- press each control and I'll read these */
         adcnow[0]=adc_read(0); adcnow[1]=adc_read(1);
         {   uint32_t lv=adcnow[1];
@@ -1164,6 +1192,7 @@ int main(void){
           if(overlay_on) draw_crosshair();
           dbg[26]=CYC-tb; }
         draw_status_if_changed();
+        draw_fps_if_changed();
         if(overlay_on) draw_bar_if_changed();
         dbg[5]=CYC-t;
 
