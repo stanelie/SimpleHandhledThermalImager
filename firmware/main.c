@@ -223,7 +223,7 @@ static void lcd_init(void){
 }
 
 /* ---------------- software I2C ---------------- */
-#define I2C_HALF 3
+#define I2C_HALF 2
 static void ihalf(void){ for(volatile int i=0;i<I2C_HALF;i++){ __asm__ volatile("nop"); } }
 static inline void scl_hi(void){ GPIOA_BSRR=SCL; }
 static inline void scl_lo(void){ GPIOA_BRR =SCL; }

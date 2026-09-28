@@ -80,8 +80,15 @@ These are **not** hardware-I2C-capable pins — I2C0 is PB6/PB7, which are displ
 data lines here. So the bus must be bit-banged; there is no way to use the
 hardware peripheral without rewiring. Pull-ups are on the main PCB.
 
-Current implementation runs at ~731 kHz (`I2C_HALF 3`). The MLX90640 tolerates up
-to 1 MHz; pushing past that makes it NACK everything.
+Current implementation runs at `I2C_HALF 2`. Measured transfer time for the 832
+words: **23.85 ms at `I2C_HALF 3`, 18.11 ms at 2, 12.35 ms at 1.**
+
+**`I2C_HALF 1` is not safe, and it fails silently.** The I2C failure counter
+stays at zero -- the sensor ACKs normally -- but every frame's housekeeping
+words then fail their physical range check: 147 rejects in 147 frames, against 0
+in 4046 at `HALF 3`. It returns corrupted data rather than NACKing, so a
+"transfers fine" test will not catch it. `HALF 2` soak-tested clean: one reject
+at boot and none in the following 535 frames.
 
 **The refresh rate register (`0x800D`, bits 9:7) is the real frame-rate limit.**
 The stock firmware leaves it at `011` = 4 Hz. This firmware sets `110` = **32 Hz**
@@ -91,7 +98,12 @@ why both changed.
 Note the register sets the *subpage* rate; a complete chess-pattern image needs
 two subpages.
 
-Measured: 23.8 ms to read 832 words (1668 bytes) at 731 kHz.
+Measured: 23.8 ms to read 832 words (1668 bytes) at `I2C_HALF 3`, 18.1 ms at 2.
+
+> The telemetry indices are easy to get backwards: **`dbg[5]` is the RENDER
+> time and `dbg[6]` is the I2C read.** Reading them the other way round makes
+> the render look like an I2C bottleneck and sends you optimising the wrong
+> stage.
 
 ### The aux words get caught mid-update
 
