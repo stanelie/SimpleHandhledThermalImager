@@ -99,6 +99,10 @@ characterisation table in [`docs/HARDWARE.md`](docs/HARDWARE.md).
 Filtering happens on the 32x24 sensor data, before upscaling -- 768 pixels
 instead of 76800, a 100x difference in cost.
 
+Performance work, the soft-float techniques behind the 9.5× speedup, and the
+optimisations that turned out to be worthless, are in
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
 ## Comparison against the RP2040 reference camera
 
 A second camera using the **same MLX90640** with an RP2040 and a 128×128 OLED

@@ -184,6 +184,36 @@ frame rate" was true of the original code and is now much less true. It remains
 too slow to ship at 7.6 fps, but it is a usable reference rather than a
 curiosity.
 
+## The verdict
+
+With the full per-pixel radiometry enabled (`R1`), **the image is
+indistinguishable from the reference.** That settles it: the substantive
+difference was always the per-pixel radiometry, and everything else — palette,
+range, filtering, interpolation — only matched the presentation on top of it.
+
+Worth dwelling on, because it is uncomfortable: Kta/Kv, the °C-vs-counts tone
+curve and TGC were each measured *individually* as negligible (0.28 counts, 3.8
+palette steps of 255, and exactly zero respectively), yet switching the whole
+chain on visibly closed the gap. Either they matter more in combination than
+separately, or one of those individual measurements was made on an
+unrepresentative scene — which is exactly the trap that made the early `alpha`
+test come back "no effect". Not resolved.
+
+### Two later findings that mattered as much
+
+**Our own 12-bit colour was destroying the image.** Long after the comparison
+was "settled", a side-by-side still showed a warm laptop rendering as one green
+blob where the reference showed a green→orange→red gradient, and faint structure
+(a table against a floor) vanishing into flat blue. Cause: RGB444 yields **93
+distinct colours from the 256-entry palette where RGB565 yields 226**, with up
+to six consecutive entries collapsing to one colour. Removed. See
+[PERFORMANCE.md](PERFORMANCE.md).
+
+**Gamma is not free.** The reference ramp is linear. Any gamma other than 1.0
+moves mid-tones — G1.5 renders a warm object occupying input indices 137–196 at
+81–139, i.e. cyan-green instead of green-orange-red. If you are comparing
+against the reference, set G1.0 or you are not comparing the same thing.
+
 ## What is genuinely left
 
 Ranked, with the measurements that justify them:
