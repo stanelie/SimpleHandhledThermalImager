@@ -58,7 +58,8 @@
  * lag is (N-1)/2 frames, both exactly predictable.
  * It has no motion adaptation at all, so movement smears over the window. */
 #define FILTER_BOX 1
-#define TFILT_MAX  4              /* RAM cap: TFILT_MAX * 768 * 2 bytes */
+#define TFILT_MAX  3              /* RAM cap: TFILT_MAX * 768 * 2 bytes.
+                                   * 4 before the per-pixel tables took 3 KB. */
 
 #define NLO 39         /* 5th percentile of 768 = the 38th coldest, plus index 0 */
 #define SPAN_MIN 52        /* minimum displayed span in raw counts (~6 degC) */

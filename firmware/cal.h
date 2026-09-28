@@ -237,6 +237,57 @@ static void build_h_tab(void){
     h_built_taTr=f_taTr;
 }
 
+/* Per-pixel constants, as scaled integers. alpha, kta and kv are fixed in the
+ * EEPROM and the terms built from them change only when Ta or Vdd move, yet the
+ * inner loop was re-decoding EEPROM bitfields and doing three int->float
+ * conversions per pixel per frame. Precomputing costs 3 KB:
+ *   t_off[p]  poff[p]*(1+kta*dTa)*(1+kv*dVdd), int16 -- poff is already int16
+ *             and the correction is within +/-1%, so it cannot overflow.
+ *   t_iac[p]  1/ac[p] relative to the array mean, uint16 in 1/16384 units.
+ *             That is 3e-5 relative resolution against alpha's 10% spread,
+ *             i.e. ~0.002 K through the 4th root -- far below the sensor's
+ *             0.7 K noise floor.
+ * Rebuilt only when Ta or Vdd actually move. */
+static int16_t  t_off[768];
+static uint16_t t_iac[768];
+static float    t_iac_mul;
+static float    t_built_ta = -1e30f, t_built_vdd = -1e30f;
+
+static void build_px_tables(void){
+    const float ktaTa=(f_ta-25.f), kvVdd=(f_vdd-3.3f);
+    const float ksTaTerm=1.f+KsTa_*ktaTa;
+    const float tgcCpA=tgc_*cpAlpha_[f_sub?1:0];
+    const float invAlphaS=p2(-alphaScale_), invKtaS1=p2(-ktaScale1_), invKvS=p2(-kvScale_);
+    float iac[768], sum=0.f;
+    for(int p=0;p<768;p++){
+        int a=(ee[64+p]&0x03F0)>>4; if(a>31) a-=64;
+        float alpha=(alphaRef_ + (float)(accRow_[p>>5]<<accRowScale_)
+                               + (float)(accCol_[p&31]<<accColScale_)
+                               + (float)(a<<accRemScale_))*invAlphaS;
+        int sp=px_split(p);
+        int t=(ee[64+p]&0x000E)>>1; if(t>3) t-=8;
+        float kta=(float)(KtaRC_[sp]+(t<<ktaScale2_))*invKtaS1;
+        float kv =(float)KvRC_[sp]*invKvS;
+
+        /* stored in 1/16 count units: poff measures -112..-48 on this sensor,
+         * so x16 reaches ~1800 against int16's 32767 -- the precision is free */
+        float off=(float)poff[p]*(1.f+kta*ktaTa)*(1.f+kv*kvVdd)*16.f;
+        int32_t oq=(int32_t)(off<0.f ? off-0.5f : off+0.5f);
+        t_off[p]=(int16_t)(oq>32767?32767:(oq<-32768?-32768:oq));
+
+        float ac=(alpha-tgcCpA)*ksTaTerm;
+        iac[p]=(ac>0.f)? 1.f/ac : 0.f;
+        sum+=iac[p];
+    }
+    float mean=sum/768.f;
+    t_iac_mul = mean*(1.f/16384.f);
+    for(int p=0;p<768;p++){
+        int32_t q=(int32_t)((iac[p]/mean)*16384.f+0.5f);
+        t_iac[p]=(uint16_t)(q<0?0:(q>65535?65535:q));
+    }
+    t_built_ta=f_ta; t_built_vdd=f_vdd;
+}
+
 /* Bulk version of mlx_to() for the reference pipeline. Identical arithmetic;
  * everything that does not depend on the pixel is computed once instead of 768
  * times -- ktaTa, kvVdd, the compensation pixel, the ksTo range coefficients,
@@ -255,27 +306,21 @@ static void ref_convert_frame(void){
     const float invKtaS1  = p2(-ktaScale1_);
     const float invKvS    = p2(-kvScale_);
     if(f_taTr!=h_built_taTr) build_h_tab();   /* only when Ta moves */
+    { float dt=f_ta-t_built_ta, dv=f_vdd-t_built_vdd;
+      if(dt<0)dt=-dt; if(dv<0)dv=-dv;
+      if(dt>0.25f || dv>0.01f) build_px_tables(); }
+    const int32_t gfp=(int32_t)(f_gain*16384.f);   /* 1/16 count units */
+    const float   iemis=1.f/(emiss*16.f);
 
     for(int p=0;p<768;p++){
-        int a=(ee[64+p]&0x03F0)>>4; if(a>31) a-=64;
-        float alpha = (alphaRef_ + (float)(accRow_[p>>5]<<accRowScale_)
-                                 + (float)(accCol_[p&31]<<accColScale_)
-                                 + (float)(a<<accRemScale_)) * invAlphaS;
-        int sp=px_split(p);
-        int t=(ee[64+p]&0x000E)>>1; if(t>3) t-=8;
-        float kta=(float)(KtaRC_[sp] + (t<<ktaScale2_))*invKtaS1;
-        float kv =(float)KvRC_[sp]*invKvS;
-
-        float ir=(float)(int16_t)frame[p]*f_gain;
-        ir -= (float)poff[p]*(1.f+kta*ktaTa)*(1.f+kv*kvVdd);
-        ir *= inv_emiss;
-        ir -= tgcIrCP;
-
-        float ac=(alpha-tgcCpA)*ksTaTerm;
+        /* gain and offset in integers, carried at 1/16 count so the
+         * quantisation is ~0.005 degC rather than ~0.09 */
+        int32_t irq = (((int32_t)frame[p]*gfp)>>10) - (int32_t)t_off[p];
+        float ir = (float)irq*iemis - tgcIrCP;
         int32_t dd;
-        if(ac<=0.f){ dd=-2731; }
-        else{
-            float Tk=f4rt(ir/ac + f_taTr);
+        {
+            float u = ir * t_iac_mul * (float)t_iac[p];
+            float Tk=f4rt(u + f_taTr);
             float fi=(Tk-H_LO)*H_INV;
             int i=(int)fi;
             if(i<0){ i=0; fi=0.f; }

@@ -146,7 +146,32 @@ Plus hoisting everything frame-constant (`ktaTa`, `kvVdd`, the compensation
 pixel, the `ksTo` range coefficients, the reciprocals that replace per-pixel
 divides) out of the loop into `ref_convert_frame()`.
 
-Result: **188.7 -> 70.2 ms, 4.0 -> 7.6 fps, a 2.7x speedup.**
+Then three more, all verified against `mlx_to()` on real data at each step:
+
+- **A direct 4th root.** The chain needs x^(1/4) three times per pixel and was
+  doing it as two nested square roots. Splitting the float into exponent and
+  mantissa and interpolating m^(1/4) from a 64-entry table costs ~6 operations
+  instead of ~30. Host-verified at 5.68e-6 relative error over the (T_K)^4
+  domain -- 0.0017 K on a 300 K target.
+- **The three-stage chain collapses to one variable.** Writing u = ir/ac, the
+  `ac` factors cancel out of every stage, so `To` depends only on u, and
+  u <-> Tk is a bijection. Two of the three 4th roots, both divides after the
+  first, and the band selection all become a 256-entry table indexed by Tk,
+  rebuilt only when Ta moves.
+- **Per-pixel constants as scaled integers.** `alpha`, `kta` and `kv` are fixed
+  in EEPROM, yet the loop was re-decoding bitfields and doing three int->float
+  conversions per pixel per frame. `t_off[]` (int16) and `t_iac[]` (uint16) cost
+  3 KB and are rebuilt only when Ta or Vdd move.
+
+Result: **188.7 -> 19.78 ms, a 9.5x speedup**, and full per-pixel radiometry
+went from 4.0 to **15.4 fps**.
+
+One trap worth recording: carrying the gain/offset intermediate as whole counts
+cost 0.36 degC of error. `poff` measures only -112..-48 on this sensor, so
+carrying it in **1/16 count units** costs nothing -- same instruction count,
+different constants -- and brings the error back to 0.055 degC mean / 0.109 max,
+which is just the 0.1 degC output storage quantisation. Check the range of a
+quantity before accepting a precision loss for it.
 
 Verified equivalent, not just faster: a host harness compiling the real `cal.h`
 against a raw frame and EEPROM dumped off the device ran both `mlx_to()` and
