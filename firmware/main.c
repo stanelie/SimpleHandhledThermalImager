@@ -42,6 +42,24 @@
 #define SRC_H 24
 #define MLX_ADDR 0x33
 #define NOISE_SHIFT_MAX 4  /* quiet-pixel averaging: 2^4 frames, ~5.6x noise reduction */
+/* Sensor subpage rate: 7 = 64 Hz, 6 = 32 Hz.
+ * Measured: 64 Hz gives 6.68 counts of temporal noise at 19 fps, 32 Hz gives
+ * 4.01 at 16.2 fps. Per unit of wall-clock time that is 1.53 vs 1.00, so 32 Hz
+ * is ~1.5x quieter for the same latency -- the 1.67x noise penalty outweighs
+ * the 1.17x extra frames. 64 Hz also reinstates the aux-word corruption that
+ * 32 Hz eliminated (0 rejects over 442 frames vs a handful per thousand). */
+#define REFRESH_SEL 7
+
+/* Temporal filter: 1 = rolling box window (FIR), 0 = adaptive EMA (IIR).
+ * The box is FIR, so a frame leaves the average completely after TFILT_N frames
+ * instead of trailing off forever, and every pixel is smoothed by exactly the
+ * same amount -- the EMA's per-pixel shift switching smooths neighbours
+ * differently, which is itself visible as texture. Noise falls by sqrt(N) and
+ * lag is (N-1)/2 frames, both exactly predictable.
+ * It has no motion adaptation at all, so movement smears over the window. */
+#define FILTER_BOX 1
+#define TFILT_MAX  4              /* RAM cap: TFILT_MAX * 768 * 2 bytes */
+
 #define NLO 39         /* 5th percentile of 768 = the 38th coldest, plus index 0 */
 #define SPAN_MIN 52        /* minimum displayed span in raw counts (~6 degC) */
 #define SHARP_INTERP 1     /* 1 = smoothstep interpolation weights, 0 = plain bilinear.
@@ -52,7 +70,7 @@
                             * staying C1-continuous so it does not look blocky.
                             * Same cost: 2 multiplies per pixel instead of 3. */
 
-volatile uint32_t dbg[24];
+volatile uint32_t dbg[32];
 static int16_t  frame[834];
 static int min_idx=400, max_idx=400;
 
@@ -60,9 +78,11 @@ static int min_idx=400, max_idx=400;
 static int32_t disp_c, disp_n, disp_x;
 #define CENTER_IDX 400
 #define BAR_H  20
-#define IMG_Y0 0
+#define TOP_H  18                 /* status bar: 7*GSC glyph + 2px box on each side */
+static int img_y0 = TOP_H;
+#define IMG_Y0 img_y0
 #define IMG_H  img_h
-static int img_h = LCD_H-BAR_H;
+static int img_h = LCD_H-BAR_H-TOP_H;
 #define BAR_Y0 (LCD_H-BAR_H)
 #define GPIOB_CRH   REG(0x40010C04)
 #define GPIOC_IDR   REG(0x40011008)
@@ -80,6 +100,24 @@ static int overlay_on = 1;
 int view_mode = 0;
 #define VIEW_INTERP  (view_mode != 1)
 #define VIEW_FILTER  (view_mode == 0)
+#define VIEW_DDE     (dde_on)
+/* V: 0 = interp+filter, 1 = raw 10x10 blocks, 2 = interp only.
+ * DDE and the filter length are separate fields now, so any combination is
+ * reachable from the wheel rather than being encoded into the view mode. */
+static int dde_on    = 1;
+static int tfilt_n   = TFILT_MAX;
+static int refresh64 = (REFRESH_SEL == 7);
+static int sel       = 0;   /* which status field the wheel adjusts: P V G B D H R */
+#define SEL_N 7
+
+/* R: 0 = our pipeline, 1 = the RP2040 reference pipeline reproduced faithfully.
+ * R1 runs the full Melexis CalculateTo on ALL 768 pixels -- the one stage we
+ * have never actually run -- so frame[] carries real temperature in tenths of a
+ * degC instead of gain/offset-corrected raw counts, and the auto-range then uses
+ * his exact formula. It is expensive (6 soft-float 4th-roots per pixel) and that
+ * is fine: it exists to answer whether the per-pixel radiometry is what makes
+ * his image look different, not to be shipped. */
+static int ref_pipe = 0;
 static uint32_t bus_hi = 0xFC00u;
 static int cur_pair = 0;
 
@@ -369,10 +407,17 @@ static void extract_offsets(void){
  * frame-to-frame change, updated slowly so real motion cannot inflate it much.
  * Runs over the 768 sensor pixels, so the cost is negligible.
  */
+#if FILTER_BOX
+static int16_t hist[TFILT_MAX][768];
+static int hist_pos=0, hist_fill=0;
+#else
 static int32_t acc[768];
+#endif
 static int acc_primed;
 static int32_t noise_est = 4000;      /* fixed point <<8 */
+#if !FILTER_BOX
 static int16_t trend[768];            /* EMA of the SIGNED delta, scaled >>4 */
+#endif
 volatile uint32_t dbg_noise;
 
 /* A/B test of the MLX90640 ADC resolution (0x800D bits 11:10).
@@ -381,6 +426,18 @@ volatile uint32_t dbg_noise;
  * abtest[] = {mean normalised noise 18-bit, same 19-bit, samples, samples} */
 volatile uint32_t abtest[4];
 
+#if FILTER_BOX
+static void denoise(void){
+    for(int i=0;i<768;i++) hist[hist_pos][i]=frame[i];
+    hist_pos = (hist_pos+1>=tfilt_n) ? 0 : hist_pos+1;
+    if(hist_fill<tfilt_n) hist_fill++;
+    for(int i=0;i<768;i++){
+        int32_t a=0;
+        for(int k=0;k<hist_fill;k++) a+=hist[k][i];
+        frame[i]=(int16_t)(a/hist_fill);
+    }
+}
+#else
 static void denoise(void){
     if(!acc_primed){
         for(int i=0;i<768;i++) acc[i]=(int32_t)frame[i]<<8;
@@ -418,6 +475,87 @@ static void denoise(void){
     noise_est += ((sumd/768) - noise_est)>>3;
     if(noise_est<256) noise_est=256;
     dbg_noise=(uint32_t)noise_est;
+}
+#endif
+
+/* ---- DDE: digital detail enhancement ---------------------------------------
+ * Split the frame into a base and a detail layer, core the noise out of the
+ * detail, boost what survives, recombine. This is the standard technique in
+ * commercial thermal imagers and it is the only one that gives uniform
+ * interiors AND crisp edges at once -- a global tone curve cannot, because it
+ * has to pick one slope per brightness.
+ *
+ * Two details matter:
+ *  - the base is an EDGE-AWARE low-pass (neighbours only average in when they
+ *    are within ~3 MAD), so edges stay in the base instead of leaking into the
+ *    detail layer and getting boosted into halos. A plain blur here is what
+ *    made the spatial stage we removed earlier useless.
+ *  - the detail layer is CORED: anything below ~1 MAD is set to zero rather
+ *    than amplified. Without this, boosting detail boosts the noise we just
+ *    spent the temporal filter removing.
+ * Cost is ~40k operations on 768 pixels, against ~1.2M cycles per frame
+ * currently spent spinning on the sensor's data-ready flag. */
+#define DDE_GAIN 28        /* 16 = 1.0x (off), 28 = 1.75x */
+static int16_t dde_base[768];
+
+/* Median |difference| between horizontally adjacent pixels.
+ * noise_est must NOT be used here: it is the temporal filter's mean
+ * frame-to-frame delta, so it tracks SCENE MOTION as much as noise -- measured
+ * at 24.21 counts on a moving hand, against a scene span of 20-60. Feeding that
+ * in made sim=72 and core=24, so every neighbour counted as "similar" (the
+ * edge-aware base degenerating into the plain blur we removed earlier) and
+ * essentially all detail was cored away.
+ * The median is robust because edges are a small minority of pixel pairs. For
+ * gaussian noise, median|delta| ~ 0.954*sigma, so this is sigma to within 5%. */
+static int32_t noise_spatial(void){
+    uint16_t h[33]; for(int i=0;i<33;i++) h[i]=0;
+    int n=0;
+    for(int r=0;r<SRC_H;r++)
+        for(int c=0;c<SRC_W-1;c++){
+            int p=r*SRC_W+c;
+            int32_t d=(int32_t)frame[p+1]-(int32_t)frame[p];
+            if(d<0) d=-d;
+            if(d>32) d=32;
+            h[d]++; n++;
+        }
+    int half=n>>1, acc=0;
+    for(int i=0;i<33;i++){ acc+=h[i]; if(acc>=half) return i<1?1:i; }
+    return 1;
+}
+
+static void dde(void){
+    int32_t nz = noise_spatial();
+    dbg[11]=(uint32_t)nz;
+    const int32_t sim  = nz*3;                 /* "same surface" threshold */
+    const int32_t core = nz;                   /* below this, detail is noise */
+    /* 4096/n, so sum*rcp>>12 cannot overflow the way a 65536-scaled one would */
+    static const uint16_t rcp[10]={0,4096,2048,1365,1024,819,683,585,512,455};
+
+    for(int r=0;r<SRC_H;r++){
+        for(int c=0;c<SRC_W;c++){
+            int p=r*SRC_W+c;
+            int32_t c0=frame[p], sum=c0; int n=1;
+            for(int dr=-1;dr<=1;dr++){
+                int rr=r+dr; if(rr<0||rr>=SRC_H) continue;
+                for(int dc=-1;dc<=1;dc++){
+                    if(!dr && !dc) continue;
+                    int cc=c+dc; if(cc<0||cc>=SRC_W) continue;
+                    int32_t v=frame[rr*SRC_W+cc];
+                    int32_t d=v-c0; if(d<0) d=-d;
+                    if(d<=sim){ sum+=v; n++; }
+                }
+            }
+            dde_base[p]=(int16_t)((sum*(int32_t)rcp[n])>>12);
+        }
+    }
+    for(int i=0;i<768;i++){
+        int32_t d=(int32_t)frame[i]-(int32_t)dde_base[i];
+        int32_t ad=d<0?-d:d;
+        if(ad<=core) d=0;
+        else{ d = (d>0)?(d-core):(d+core); d = (d*DDE_GAIN)>>4; }
+        int32_t v=(int32_t)dde_base[i]+d;
+        frame[i]=(int16_t)(v>32767?32767:(v<-32768?-32768:v));
+    }
 }
 #endif
 
@@ -535,6 +673,22 @@ static void render_prep(void){
      * honest, and far less amplified noise. ~8.6 counts per degC on this unit. */
     int32_t lo_d=mn_s, hi_d=mx_s;
     int32_t span = hi_d-lo_d;
+    if(ref_pipe){
+        /* step = (ceil(max+1) - floor(min-1)) / 255, index = (v - min)/step.
+         * Note he subtracts the UNPADDED min but divides by the PADDED span, so
+         * the coldest pixel lands on 0 and the pad is spent entirely at the top.
+         * Working in tenths, "whole degrees" means multiples of 10. */
+        int32_t mn_dd=lo[0], mx_dd=hi[0];
+        int32_t a=mx_dd+10, b=mn_dd-10;
+        int32_t hi_p = (a>=0) ? ((a+9)/10)*10 : -(((-a)/10)*10);   /* ceil  to 1 degC */
+        int32_t lo_p = (b>=0) ? (b/10)*10 : -((((-b)+9)/10)*10);   /* floor to 1 degC */
+        span = hi_p - lo_p;
+        if(span<1) span=1;
+        lo_d = mn_dd;
+        r_inv10 = (255*65536)/span;
+        r_base10 = lo_d;
+        return;
+    }
     if(pal_id==3){
         /* RP2040 reference range: the TRUE frame extremes (no 4th-extreme trim),
          * no inter-frame EMA, and no minimum span -- then padded, which is his
@@ -627,6 +781,52 @@ static void render_band(int Y0,int Y1){
 
 #include "gfx.h"
 
+/* Top status bar: which palette, view mode, gamma and filter are live, so a
+ * described setting and an observed image can be matched up. It sits above the
+ * thermal image rather than over it, so the render never paints across it and
+ * it only redraws when something actually changes.
+ *   P<n>  palette   0 reference / 1 rainbow / 2 ironbow / 3 grayscale
+ *   V<n>  view mode 0 filter+DDE / 1 raw blocks / 2 interp only / 3 filter, DDE off
+ *   G<x>  gamma
+ *   B<n>  box filter over n frames  (E = adaptive EMA instead)
+ *   D<n>  DDE on/off */
+static int st_field(int x,int idx,int8_t lead,const int8_t *d,int nd){
+    int8_t g[8]; int n=0;
+    g[n++]=lead;
+    for(int i=0;i<nd;i++) g[n++]=d[i];
+    g[n]=-1;
+    draw_glyphs(x, 2, g, (sel==idx)?C_SEL:C_WHITE, C_BLACK);
+    return x + glyphs_w(g) + GW;
+}
+
+static void draw_status_if_changed(void){
+    static int l_p=-1,l_v=-1,l_g=-1,l_on=-1,l_b=-1,l_d=-1,l_h=-1,l_s=-1,l_r=-1;
+    if(pal_id==l_p && view_mode==l_v && gamma_id==l_g && overlay_on==l_on
+       && tfilt_n==l_b && dde_on==l_d && refresh64==l_h && sel==l_s
+       && ref_pipe==l_r) return;
+    l_p=pal_id; l_v=view_mode; l_g=gamma_id; l_on=overlay_on;
+    l_b=tfilt_n; l_d=dde_on; l_h=refresh64; l_s=sel; l_r=ref_pipe;
+
+    fill_rect(0,0,LCD_W,TOP_H,C_BLACK);
+    if(!overlay_on) return;
+
+    static const int8_t gdig[5][3] = {{4,GL_DOT,0},{3,GL_DOT,0},{2,GL_DOT,0},
+                                      {1,GL_DOT,5},{1,GL_DOT,0}};
+    int8_t d[3]; int x=4;
+    d[0]=(int8_t)pal_id;                       x=st_field(x,0,GL_P,d,1);
+    d[0]=(int8_t)view_mode;                    x=st_field(x,1,GL_V,d,1);
+                                               x=st_field(x,2,GL_G,gdig[gamma_id],3);
+#if FILTER_BOX
+    d[0]=(int8_t)tfilt_n;                      x=st_field(x,3,GL_B,d,1);
+#else
+    d[0]=-1;                                   x=st_field(x,3,GL_E,d,0);
+#endif
+    d[0]=(int8_t)(dde_on?1:0);                 x=st_field(x,4,GL_D,d,1);
+    d[0]=refresh64?6:3; d[1]=refresh64?4:2;    x=st_field(x,5,GL_H,d,2);
+    d[0]=(int8_t)(ref_pipe?1:0);               x=st_field(x,6,GL_R,d,1);
+    (void)x;
+}
+
 int main(void){
     clock_init(); dwt_init();
     RCC_APB2ENR |= 1u|(1u<<2)|(1u<<3)|(1u<<4);
@@ -668,7 +868,7 @@ int main(void){
      * which is exactly where the RP2040 reference camera runs. It also makes a
      * full 832-word read fit inside one 31.2 ms update period instead of
      * straddling it, which is the structural fix for the corrupted aux words. */
-    ctrl = (uint16_t)((ctrl & ~(7u<<7)) | (6u<<7));   /* 32 Hz subpage rate */
+    ctrl = (uint16_t)((ctrl & ~(7u<<7)) | ((uint32_t)REFRESH_SEL<<7));
     /* 19-bit ADC. Measured on this unit (docs/HARDWARE.md): 18-bit carries 86.6
      * counts of fixed-pattern noise against 19-bit's 25.2 -- 3.4x worse -- while
      * costing only 3.26 vs 6.68 counts of temporal noise, which poff[] cannot
@@ -756,9 +956,31 @@ int main(void){
             if(act==raw) cnt++; else { raw=act; cnt=0; }
             if(cnt>=1 && act!=stable){
                 stable=act;
-                if(act==1){ pal_id=(pal_id+3)%4; pal_init(); }
-                else if(act==2){ pal_id=(pal_id+1)%4; pal_init(); }
-                else if(act==3){ gamma_id=(gamma_id+1)%5; pal_init(); }
+                if(act==3){ sel=(sel+1)%SEL_N; }          /* push: next field */
+                else if(act==1 || act==2){                 /* left/right: adjust */
+                    int d = (act==2) ? 1 : -1;
+                    switch(sel){
+                    case 0: pal_id=(pal_id+4+d)%4;      pal_init(); break;
+                    case 1: view_mode=(view_mode+3+d)%3;            break;
+                    case 2: gamma_id=(gamma_id+5+d)%5;  pal_init(); break;
+                    case 3: tfilt_n += d;
+                            if(tfilt_n<1) tfilt_n=TFILT_MAX;
+                            else if(tfilt_n>TFILT_MAX) tfilt_n=1;
+                            hist_fill=0; hist_pos=0;                break;
+                    case 4: dde_on = !dde_on;                       break;
+                    case 6: ref_pipe = !ref_pipe;
+                            hist_fill=0; hist_pos=0;                break;
+                    case 5: refresh64 = !refresh64;
+                            { uint16_t c=0;
+                              if(mlx_read(0x800D,&c,1)){
+                                  c=(uint16_t)((c & ~(7u<<7)) | ((refresh64?7u:6u)<<7));
+                                  mlx_write(0x800D,c);
+                                  if(mlx_read(0x800D,&c,1)) ctrl=c;  /* read back */
+                                  dbg[1]=ctrl;
+                              } }
+                            hist_fill=0; hist_pos=0;                break;
+                    }
+                }
             }
             dbg[21]=(uint32_t)cur_pair;
         }
@@ -794,9 +1016,34 @@ int main(void){
         mlx_write(0x8000,0x0030);
 
         calc_frame_params(ctrl, st & 1);
-        int32_t tc=(int32_t)(mlx_to(CENTER_IDX)*100.f);
-        int32_t tn=(int32_t)(mlx_to(min_idx)*100.f);
-        int32_t tx=(int32_t)(mlx_to(max_idx)*100.f);
+        /* The reference pipeline must convert BEFORE the labels are taken, or
+         * they get recomputed from raw against indices belonging to the
+         * previous frame -- which is how min ended up reading above max. */
+        if(ref_pipe){
+            uint32_t t0=CYC;
+            ref_convert_frame();
+            dbg[24]=CYC-t0;
+        }
+        int32_t tc,tn,tx;
+        if(ref_pipe){
+            /* frame[] already IS temperature, so scan it directly. Using the
+             * previous frame's min_idx/max_idx instead gave min above max: on a
+             * near-uniform scene the extreme pixel moves every frame, so last
+             * frame's location is an arbitrary pixel. The reference firmware
+             * likewise takes the true min/max of the current frame. */
+            int16_t vmn=frame[0], vmx=frame[0];
+            for(int p=1;p<768;p++){
+                int16_t v=frame[p];
+                if(v<vmn) vmn=v; else if(v>vmx) vmx=v;
+            }
+            tc=(int32_t)frame[CENTER_IDX]*10;
+            tn=(int32_t)vmn*10;
+            tx=(int32_t)vmx*10;
+        }else{
+            tc=(int32_t)(mlx_to(CENTER_IDX)*100.f);
+            tn=(int32_t)(mlx_to(min_idx)*100.f);
+            tx=(int32_t)(mlx_to(max_idx)*100.f);
+        }
         dbg[16]=(uint32_t)tc; dbg[17]=(uint32_t)tn; dbg[18]=(uint32_t)tx;
         dbg[19]=(uint32_t)(int32_t)(f_ta*100.f);
         /* mn_s/mx_s are those same two pixels in counts, so their ratio to the
@@ -813,7 +1060,7 @@ int main(void){
                 else             cpd100 += (c - cpd100) >> 3;   /* ~8-frame EMA */
             }
         }
-        dbg[20]=(uint32_t)cpd100;
+        dbg[23]=(uint32_t)cpd100;
 
         /* don't feed the labels until the housekeeping values have validated once,
          * or the first frames after power-on show nonsense temperatures */
@@ -828,23 +1075,30 @@ int main(void){
             sum_c=sum_n=sum_x=0; nsamp=0; t_lbl=CYC;
         }
 
-        correct_frame();
+        if(!ref_pipe) correct_frame();
 
         dbg[14]=aux_rejects;
 
 #ifndef DIAG
+#if FILTER_BOX
+        if(VIEW_FILTER) denoise(); else hist_fill=0;
+#else
         if(VIEW_FILTER) denoise(); else acc_primed=0;
+#endif
+        { uint32_t td=CYC; if(VIEW_DDE) dde(); dbg[3]=CYC-td; }
 #endif
 
         t=CYC;
         render_prep();
-        img_h = overlay_on ? (LCD_H-BAR_H) : LCD_H;
+        img_y0 = overlay_on ? TOP_H : 0;
+        img_h  = overlay_on ? (LCD_H-BAR_H-TOP_H) : LCD_H;
         /* the crosshair spans img_h/2 +/- 10, so the split must be below it or
          * the next band repaints its lower half */
-        int cross_lo = img_h/2 + 11;
-        render_band(0, cross_lo-1);
+        int cross_lo = img_y0 + img_h/2 + 11;
+        render_band(img_y0, cross_lo-1);
         if(overlay_on) draw_crosshair();
-        if(cross_lo <= img_h-1) render_band(cross_lo, img_h-1);
+        if(cross_lo <= img_y0+img_h-1) render_band(cross_lo, img_y0+img_h-1);
+        draw_status_if_changed();
         if(overlay_on) draw_bar_if_changed();
         dbg[5]=CYC-t;
 

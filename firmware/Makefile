@@ -18,7 +18,7 @@ flash: firmware.elf
 # read the dbg[] telemetry array out of a running target
 debug: firmware.elf
 	$(OOCD) -c "init" -c "halt" \
-	  -c "mdw $$($(CROSS)nm firmware.elf | awk '/ [bB] dbg$$/{print "0x"$$1}') 24" \
+	  X \
 	  -c "resume" -c "shutdown"
 
 clean:

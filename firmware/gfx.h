@@ -31,7 +31,26 @@ static const uint8_t font5x7[][5] = {
     {0x7E,0x11,0x11,0x11,0x7E}, /* 16 A */
     {0x63,0x14,0x08,0x14,0x63}, /* 17 X */
     {0x00,0x00,0x00,0x00,0x00}, /* 18 space */
+    {0x7F,0x09,0x09,0x09,0x06}, /* 19 P */
+    {0x1F,0x20,0x40,0x20,0x1F}, /* 20 V */
+    {0x3E,0x41,0x49,0x49,0x7A}, /* 21 G */
+    {0x7F,0x49,0x49,0x49,0x36}, /* 22 B */
+    {0x7F,0x41,0x41,0x22,0x1C}, /* 23 D */
+    {0x7F,0x49,0x49,0x49,0x41}, /* 24 E */
+    {0x7F,0x08,0x08,0x08,0x7F}, /* 25 H */
+    {0x7F,0x09,0x19,0x29,0x46}, /* 26 R */
 };
+#define GL_DOT 10
+#define GL_SP  18
+#define GL_P   19
+#define GL_V   20
+#define GL_G   21
+#define GL_B   22
+#define GL_D   23
+#define GL_E   24
+#define GL_H   25
+#define GL_R   26
+#define C_SEL  RGB(255,230,0)   /* highlighted status field */
 
 static void fill_rect(int x,int y,int w,int h,uint16_t c){
     if(x<0||y<0||x+w>LCD_W||y+h>LCD_H||w<=0||h<=0) return;
@@ -107,10 +126,11 @@ static void draw_overlay_test(void){
 extern int view_mode;
 
 static void draw_crosshair(void){
-    int cy = img_h/2;
+    int cy = IMG_Y0 + img_h/2;
     /* crosshair colour reports the view mode */
     uint16_t col = (view_mode==1) ? RGB(255,255,0)      /* raw: no interp, no filter */
                  : (view_mode==2) ? RGB(255,80,255)     /* interp only, no filter    */
+                 : (view_mode==3) ? RGB(0,255,255)      /* filter on, DDE off        */
                                   : C_WHITE;            /* normal                    */
     fill_rect(LCD_W/2-10, cy-1, 21, 2, col);
     fill_rect(LCD_W/2-1,  cy-10, 2, 21, col);

@@ -109,6 +109,56 @@ varies smoothly across the array, so it produces shading rather than
 pixel-to-pixel texture. Overall sigma dropped 5.05 → 3.79 when corrected while
 the high-pass component was untouched.
 
+## Is the RP2040 just more powerful? No.
+
+It is a dual **Cortex-M0+** — Thumb-1, no hardware divide, no bitfield
+instructions — which is a *weaker* core per clock than our Cortex-M3. Its
+advantage in running full per-pixel radiometry at 16 fps is three other things:
+
+| factor | contribution |
+|---|---|
+| clock, 133 MHz vs 72 MHz | 1.85x |
+| **bootrom floating-point routines** | the rest |
+| dual core | rendering offloaded to core1 |
+
+That middle row is the real one: the RP2040's bootrom ships hand-written
+assembly float routines (`float_init_rom_rp2040.c`, `float_v1_rom_shim_rp2040.S`
+and a DCP-based `sqrtf_fast` in the Pico SDK). We link generic libgcc
+soft-float. On code doing six 4th-roots per pixel that gap is large, and it is a
+software advantage baked into their silicon that we cannot borrow.
+
+### Our own implementation was the bigger problem
+
+Running `CalculateTo` on all 768 pixels first measured **188.7 ms — 4.0 fps**,
+which is, notably, exactly the rate the stock vendor firmware ran at. Two pieces
+of code were pathological:
+
+- **`fsqrtf` ran 8 Newton iterations on sqrt directly, each containing a
+  soft-float DIVIDE** — 16 divides per 4th-root, six 4th-roots per pixel.
+  Replaced with Newton on the *reciprocal* square root, which is multiplies
+  only. Verified on host over x = 1e-12..1e14: 1.65e-7 max relative error at 3
+  iterations against the old version's 1.19e-7, i.e. both at float epsilon.
+- **`p2(n)` computed 2^n by multiplying in a loop**, and `px_alpha()` calls it
+  with `alphaScale_ = 38` for *every pixel*. It is an exponent field: bit-exact
+  replacement, O(1).
+
+Plus hoisting everything frame-constant (`ktaTa`, `kvVdd`, the compensation
+pixel, the `ksTo` range coefficients, the reciprocals that replace per-pixel
+divides) out of the loop into `ref_convert_frame()`.
+
+Result: **188.7 -> 70.2 ms, 4.0 -> 7.6 fps, a 2.7x speedup.**
+
+Verified equivalent, not just faster: a host harness compiling the real `cal.h`
+against a raw frame and EEPROM dumped off the device ran both `mlx_to()` and
+`ref_convert_frame()` over all 768 pixels. **Mean difference 0.0502 C, maximum
+0.0998 C** -- entirely the 0.1 C decidegree storage quantisation, with the
+arithmetic identical.
+
+So the README's old claim that converting all 768 pixels "would cost most of the
+frame rate" was true of the original code and is now much less true. It remains
+too slow to ship at 7.6 fps, but it is a usable reference rather than a
+curiosity.
+
 ## What is genuinely left
 
 Ranked, with the measurements that justify them:
