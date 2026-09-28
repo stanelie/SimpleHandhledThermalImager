@@ -17,10 +17,10 @@ describes how, and which approaches wasted time.
 
 | | stock | this firmware |
 |---|---|---|
-| frame rate | 4 fps | **19 fps** |
-| image | 32×24 nearest-neighbour, visible fixed-pattern noise | bilinear 10× upscale to 320×240, offset-calibrated, temporally denoised |
+| frame rate | 4 fps | **16.2 fps** (19 fps at 64 Hz; 32 Hz was chosen for image quality) |
+| image | 32×24 nearest-neighbour, visible fixed-pattern noise | bilinear 10× upscale to 320×240, gain/offset/**per-pixel sensitivity** corrected, temporally denoised |
 | temperature | none displayed | min / centre / max in °C |
-| palette | fixed | 3 palettes + 4 gamma curves, switchable live |
+| palette | fixed | 4 palettes × 5 gamma curves, switchable live |
 | diagnostics | — | view modes that disable interpolation and/or filtering, to separate sensor behaviour from processing |
 | USB / snapshots | yes | removed |
 
@@ -39,8 +39,8 @@ ceiling, worth roughly another 2 fps.
 | control | action |
 |---|---|
 | middle button | toggle the OSD (when hidden, the image expands to the full 240 rows) |
-| wheel left / right | cycle palette: rainbow → ironbow → grayscale |
-| wheel push | cycle gamma: 4.0 → 3.0 → 2.0 → 1.5 (default 4.0) |
+| wheel left / right | cycle palette: **RP2040 reference (default)** → rainbow → ironbow → grayscale |
+| wheel push | cycle gamma: **1.0 linear (default)** → 4.0 → 3.0 → 2.0 → 1.5 |
 | second button | cycle view mode: interpolation+filter (white crosshair) → neither, raw 10×10 blocks (yellow) → interpolation only (magenta) |
 
 ## Noise, and what actually helps
@@ -72,8 +72,14 @@ fixed pattern turned out to be small anyway. It is in git history if wanted.
 ## Processing pipeline
 
 ```
-read raw frame  ->  gain + per-pixel offset + flat-field  ->  adaptive temporal filter  ->  bilinear 10x upscale + gamma + palette
+read raw frame -> gain + per-pixel offset + per-pixel sensitivity (1/alpha)
+               -> adaptive temporal filter
+               -> bilinear 10x upscale (smoothstep weights) + gamma + palette
 ```
+
+There is still **no spatial processing of any kind** -- every pixel is filtered
+in isolation, in time only. That is the largest remaining gap; see
+[docs/RP2040-COMPARISON.md](docs/RP2040-COMPARISON.md).
 
 Every stage is there because a measurement said so, and three earlier stages were
 removed once measured: a subpage equaliser (the difference was ~0.4 counts), the
@@ -83,6 +89,19 @@ characterisation table in [`docs/HARDWARE.md`](docs/HARDWARE.md).
 
 Filtering happens on the 32x24 sensor data, before upscaling -- 768 pixels
 instead of 76800, a 100x difference in cost.
+
+## Comparison against the RP2040 reference camera
+
+A second camera using the **same MLX90640** with an RP2040 and a 128×128 OLED
+produced a visibly better image, and closing that gap drove a long
+investigation. The findings -- including nine hypotheses that were measured and
+rejected -- are in **[docs/RP2040-COMPARISON.md](docs/RP2040-COMPARISON.md)**.
+
+The three that mattered: **18-bit → 19-bit ADC** (3.4× less fixed-pattern
+noise), **per-pixel sensitivity `alpha` was never applied to the image** (sigma
+9.93%, and multiplicative, so it only shows on warm targets), and **64 → 32 Hz**
+(√2 less temporal noise, and it structurally eliminated the corrupted aux
+words -- 0 rejects over 442 frames).
 
 ## Build and flash
 
@@ -166,10 +185,6 @@ docs/         hardware map and reverse-engineering notes
   rendered from gain- and offset-corrected raw counts, which is monotonic in
   temperature but not calibrated per pixel. Converting all 768 pixels would cost
   most of the frame rate on a soft-float Cortex-M3.
-- **The flat-field table lives in RAM and is lost on every power cycle**, so the
-  grid returns until the second button is pressed again. Since FPN measured
-  26-40x larger than random noise, persisting this table to the unused SPI flash
-  is probably the highest-value remaining improvement.
 - The SPI NOR flash (XT25F128F) is present but unused.
 - A rare full-device hang was seen once and not yet reproduced; when caught, the
   core showed **no fault** (CFSR/HFSR clear) and the loop was still advancing, so

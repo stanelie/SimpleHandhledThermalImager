@@ -42,7 +42,15 @@
 #define SRC_H 24
 #define MLX_ADDR 0x33
 #define NOISE_SHIFT_MAX 4  /* quiet-pixel averaging: 2^4 frames, ~5.6x noise reduction */
+#define NLO 39         /* 5th percentile of 768 = the 38th coldest, plus index 0 */
 #define SPAN_MIN 52        /* minimum displayed span in raw counts (~6 degC) */
+#define SHARP_INTERP 1     /* 1 = smoothstep interpolation weights, 0 = plain bilinear.
+                            * At 10x magnification a linear ramp spreads every edge over
+                            * 10 display pixels. Smoothstep (t^2*(3-2t)) concentrates the
+                            * transition into the middle ~5, which is roughly the edge
+                            * width the 4x-magnified RP2040 camera gets for free, while
+                            * staying C1-continuous so it does not look blocky.
+                            * Same cost: 2 multiplies per pixel instead of 3. */
 
 volatile uint32_t dbg[24];
 static int16_t  frame[834];
@@ -239,8 +247,21 @@ static uint32_t isqrt32(uint32_t n){
     return res;
 }
 
-static int pal_id = 0;
-static int gamma_id = 0;   /* cycles 4.0 -> 3.0 -> 2.0 -> 1.5 -> 4.0 */
+static int pal_id = 3;   /* RP2040 reference palette + range is the default */
+/* Counts per degC, measured live. It is NOT a constant: it scales with the ADC
+ * resolution (~8.6 at 18-bit, ~5.25 at 19-bit on this unit) and drifts with gain
+ * and Ta, so hard-coding it silently mis-sizes anything expressed in degC. */
+static int32_t cpd100 = 600;
+static int cpd_primed = 0;
+/* The trimmed extremes in counts, instantaneous. mn_s/mx_s are EMA-smoothed and
+ * must NOT be used to derive cpd100: tn/tx are computed from THIS frame's
+ * min_idx/max_idx, so pairing them with smoothed counts mixes two different
+ * moments and biases the ratio whenever the scene is changing. */
+static int16_t mn_i = 0, mx_i = 0;
+/* 4 = linear (1.0), the default: the RP2040 reference ramp has no gamma, so the
+ * reference palette must boot linear to match it. The wheel push cycles
+ * 1.0 -> 4.0 -> 3.0 -> 2.0 -> 1.5 -> 1.0 and now applies to every palette. */
+static int gamma_id = 4;
 
 static void pal_init(void){
     for(int i=0;i<256;i++){
@@ -252,6 +273,29 @@ static void pal_init(void){
             else           { int u=i-192; r=255;         g=200+(u*55)/63; b=(u*255)/63; }
         } else if(pal_id==2){                /* grayscale */
             r=g=b=i;
+        } else if(pal_id==3){                /* RP2040 reference (see docs/RP2040-COMPARISON.md) */
+            /* André Weinand's heatmap: 7 anchors, linearly interpolated.
+             * Reproduces heatmap_init() in his main.cpp exactly, including the
+             * round() and the exact-anchor special case at i=0 and i=255. */
+            static const uint8_t anch[7][3]={
+                {  0,  0,  0},   /* black  */
+                {  4, 51,255},   /* blue   */
+                {  0,253,255},   /* cyan   */
+                {  0,249,  0},   /* green  */
+                {255,255,  0},   /* yellow */
+                {255, 38,  0},   /* red    */
+                {255,255,255}    /* white  */
+            };
+            int num=i*6, k=num/255, rem=num%255;
+            if(rem==0){ r=anch[k][0]; g=anch[k][1]; b=anch[k][2]; }
+            else{
+                /* c1 + round((c2-c1)*rem/255) */
+                int r1=anch[k][0], g1=anch[k][1], b1=anch[k][2];
+                int r2=anch[k+1][0], g2=anch[k+1][1], b2=anch[k+1][2];
+                r = r1 + (2*(r2-r1)*rem + (r2>=r1?255:-255))/510;
+                g = g1 + (2*(g2-g1)*rem + (g2>=g1?255:-255))/510;
+                b = b1 + (2*(b2-b1)*rem + (b2>=b1?255:-255))/510;
+            }
         } else {                             /* rainbow (default) */
             if      (i< 48){ int u=i;     r=0;            g=0;            b=(u*255)/47; }
             else if (i<112){ int u=i-48;  r=0;            g=(u*255)/63;   b=255; }
@@ -266,7 +310,8 @@ static void pal_init(void){
         uint32_t c3=c2*(uint32_t)i;
         uint32_t r;
         /* 255*(i/255)^g ; i^4 peaks at 4228250625, which still fits a uint32 */
-        if(gamma_id==0)      r=(c2*c2)/16581375u;       /* 4.0 */
+        if(gamma_id==4)      r=(uint32_t)i;             /* 1.0, linear */
+        else if(gamma_id==0) r=(c2*c2)/16581375u;       /* 4.0 */
         else if(gamma_id==1) r=c3/65025u;               /* 3.0 */
         else if(gamma_id==2) r=c2/255u;                 /* 2.0 */
         else                 r=isqrt32(c3/255u);        /* 1.5 */
@@ -405,6 +450,31 @@ volatile uint32_t d_n, d_cfg;
 
 
 /* gain-correct then subtract the per-pixel offset -- kills the fixed-pattern dots */
+#define ALPHA_NORM 1   /* per-pixel sensitivity normalisation; 0 to A/B it */
+
+/* 1/alpha[i], normalised to the array mean, in 1/4096 units.
+ * Measured on this sensor's EEPROM: alpha has sigma 9.93%, peak-to-peak 42.8%,
+ * and it is MULTIPLICATIVE, so the error it causes scales with signal -- a
+ * couple of counts on an ambient wall, ~1.7 degC across a hand. Correlation of
+ * the uncorrected image against alpha on a flat field measured r = -0.690.
+ * The reference RP2040 firmware gets this for free inside CalculateTo; we skip
+ * CalculateTo for the image (768 soft-float conversions would cost most of the
+ * frame rate), so the division has to happen here instead. One multiply and a
+ * shift per pixel. */
+static uint16_t arcp[768];
+
+static void build_alpha_rcp(void){
+    float sum=0.f;
+    for(int i=0;i<768;i++) sum += px_alpha(i);
+    float mean = sum/768.f;
+    for(int i=0;i<768;i++){
+        float a = px_alpha(i);
+        int32_t q = (a>0.f) ? (int32_t)((mean/a)*4096.f+0.5f) : 4096;
+        if(q<1024) q=1024; else if(q>16383) q=16383;
+        arcp[i]=(uint16_t)q;
+    }
+}
+
 static void correct_frame(void){
     /* use the gain already validated in calc_frame_params -- a second I2C read
      * here was a second chance to catch a mid-update word, and its gr==0
@@ -412,6 +482,9 @@ static void correct_frame(void){
     int32_t gfp = lg_gfp;
     for(int i=0;i<768;i++){
         int32_t v=(((int32_t)frame[i]*gfp)>>10) - poff[i];
+#if ALPHA_NORM
+        v = (v * (int32_t)arcp[i]) >> 12;
+#endif
         frame[i]=(int16_t)(v>32767?32767:(v<-32768?-32768:v));
     }
 }
@@ -423,13 +496,24 @@ static int32_t r_inv10, r_base10;
 static void render_prep(void){
     /* Trimmed range: ignore the 4 most extreme pixels at each end, so a single
      * corrupted word cannot blow out the auto-scale (that was the blue flash). */
-    int16_t lo[4]={32767,32767,32767,32767}, hi[4]={-32768,-32768,-32768,-32768};
+    /* Keep the NLO coldest in ascending order: lo[3] is the 4th-coldest the OSD
+     * and the other palettes use, lo[NLO-1] is the 5th percentile that anchors
+     * black for the reference palette. Anchoring on the ABSOLUTE minimum (what
+     * the RP2040 firmware does) only yields a black background when the
+     * background is itself the noisiest, coldest thing in frame -- true for its
+     * unfiltered image, false for ours, which left the background floating at
+     * index ~75 (dark blue) with just 2 pixels reaching black.
+     * The early-out on lo[NLO-1] rejects ~95% of pixels after warm-up, so the
+     * wider array costs little. */
+    int16_t lo[NLO]; for(int k=0;k<NLO;k++) lo[k]=32767;
+    int16_t hi[4]={-32768,-32768,-32768,-32768};
     for(int i=0;i<768;i++){
         int16_t v=frame[i];
-        if(v<lo[3]){ int k=3; while(k>0 && v<lo[k-1]){ lo[k]=lo[k-1]; k--; } lo[k]=v; }
+        if(v<lo[NLO-1]){ int k=NLO-1; while(k>0 && v<lo[k-1]){ lo[k]=lo[k-1]; k--; } lo[k]=v; }
         if(v>hi[3]){ int k=3; while(k>0 && v>hi[k-1]){ hi[k]=hi[k-1]; k--; } hi[k]=v; }
     }
     int16_t mn=lo[3], mx=hi[3];
+    mn_i=mn; mx_i=mx;
     for(int i=0;i<768;i++){ if(frame[i]==mn) min_idx=i; else if(frame[i]==mx) max_idx=i; }
 
     /* measure the checkerboard: mean of each chess-pattern subpage class */
@@ -451,7 +535,35 @@ static void render_prep(void){
      * honest, and far less amplified noise. ~8.6 counts per degC on this unit. */
     int32_t lo_d=mn_s, hi_d=mx_s;
     int32_t span = hi_d-lo_d;
-    if(span < SPAN_MIN){
+    if(pal_id==3){
+        /* RP2040 reference range: the TRUE frame extremes (no 4th-extreme trim),
+         * no inter-frame EMA, and no minimum span -- then padded, which is his
+         *   step = (ceil(max+1) - floor(min-1)) / 255
+         * That pad averages 3 degC over the two ends; at the measured 8.6
+         * counts/degC on this unit that is ~13 counts each side. The exact
+         * ceil/floor to integer degC is not reproducible here because the image
+         * path carries raw counts with an arbitrary zero, not absolute degC --
+         * it is a +/-0.5 degC jitter in the range and nothing else. */
+        /* His index is (value - min) / step with step = padded_span/255, i.e. he
+         * subtracts the UNPADDED min but divides by the PADDED span. So the
+         * coldest pixel lands on index 0 -- pure black -- and the pad is spent
+         * entirely at the top, where his hottest pixel reaches only
+         * 255*(max-min)/padded_span and never gets to white. Padding both ends
+         * symmetrically (what I did first) lifts the coldest pixel to index ~33,
+         * a strong blue instead of black, which is visibly wrong at the dark end. */
+        lo_d = (int32_t)lo[NLO-1];   /* 5th percentile, not the absolute min */
+        int32_t pad = (3*cpd100)/100;            /* his ceil/floor pad averages 3 degC */
+        if(pad<4) pad=4; else if(pad>60) pad=60;  /* guard a wild cpd100 */
+        /* hi[3], NOT hi[0]. The absolute maximum lets a single corrupted or
+         * noise-spiked pixel blow the span up, collapsing every real pixel to
+         * index ~0 -- the whole thermal image goes black for one frame while the
+         * info bar, drawn separately, survives. That is the same failure as the
+         * old "blue flash", which the 4-pixel trim fixed for the other palettes;
+         * matching the reference firmware's untrimmed max reintroduced it here. */
+        span = ((int32_t)hi[3] - lo_d) + pad;
+        hi_d = lo_d + span;
+    }
+    else if(span < SPAN_MIN){
         int32_t mid=(hi_d+lo_d)/2;
         lo_d = mid - SPAN_MIN/2;
         hi_d = mid + SPAN_MIN/2;
@@ -471,11 +583,21 @@ static void render_band(int Y0,int Y1){
     GPIOA_BRR =PA3;
 
     const uint32_t vstep = ((uint32_t)SRC_H<<16)/(uint32_t)img_h;
+#if SHARP_INTERP
+    /* smoothstep(fx/10) * 256 */
+    static const uint16_t wx[10]={0,7,27,55,90,128,166,201,229,249};
+#else
+    static const uint16_t wx[10]={0,26,51,77,102,128,154,179,205,230};
+#endif
     for(int Y=Y0; Y<=Y1; Y++){
         uint32_t vpos = (uint32_t)(Y-IMG_Y0)*vstep;
         int sy = (int)(vpos>>16);
         if(sy>SRC_H-1) sy=SRC_H-1;
-        int wy1 = VIEW_INTERP ? (int)((vpos>>8)&0xFF) : 0, wy0 = 256-wy1;
+        int wy1 = VIEW_INTERP ? (int)((vpos>>8)&0xFF) : 0;
+#if SHARP_INTERP
+        wy1 = (int)(((uint32_t)wy1*(uint32_t)wy1*(768u-2u*(uint32_t)wy1))>>16);
+#endif
+        int wy0 = 256-wy1;
         const int16_t *r0=&frame[sy*SRC_W];
         const int16_t *r1=&frame[(sy<SRC_H-1?sy+1:sy)*SRC_W];
         uint8_t idxc[SRC_W+1];
@@ -493,7 +615,8 @@ static void render_band(int Y0,int Y1){
                 for(int fx=0; fx<10; fx++) px_fast(c);
             } else {
                 for(int fx=0; fx<10; fx++){
-                    int k = (a*(10-fx) + b*fx) * 3277 >> 15;   /* /10 */
+                    int w = wx[fx];
+                    int k = (a*(256-w) + b*w) >> 8;
                     px_fast(pal[k]);
                 }
             }
@@ -539,13 +662,25 @@ int main(void){
 
     uint16_t ctrl=0;
     mlx_read(0x800D,&ctrl,1);
-    ctrl = (uint16_t)((ctrl & ~(7u<<7)) | (7u<<7));   /* 64 Hz subpage rate */
-    ctrl = (uint16_t)((ctrl & ~(3u<<10)) | (2u<<10));  /* 18-bit ADC */
+    /* 32 Hz subpage rate. Measured (docs/HARDWARE.md): halves temporal noise
+     * (6.68 -> 4.01 counts at 19-bit, the sqrt(2) expected from doubled
+     * integration time) and leaves FPN unchanged. Costs ~3 fps, landing at ~16,
+     * which is exactly where the RP2040 reference camera runs. It also makes a
+     * full 832-word read fit inside one 31.2 ms update period instead of
+     * straddling it, which is the structural fix for the corrupted aux words. */
+    ctrl = (uint16_t)((ctrl & ~(7u<<7)) | (6u<<7));   /* 32 Hz subpage rate */
+    /* 19-bit ADC. Measured on this unit (docs/HARDWARE.md): 18-bit carries 86.6
+     * counts of fixed-pattern noise against 19-bit's 25.2 -- 3.4x worse -- while
+     * costing only 3.26 vs 6.68 counts of temporal noise, which poff[] cannot
+     * remove and the temporal filter cannot touch. The RP2040 camera uses 19-bit
+     * (MLX90640_SetResolution(addr,3)), which is why its uniform areas are clean. */
+    ctrl = (uint16_t)((ctrl & ~(3u<<10)) | (3u<<10));  /* 19-bit ADC */
     mlx_write(0x800D, ctrl);
     dbg[1]=ctrl;
     dbg[14]=mlx_read(0x2400, ee, 832);
     extract_offsets();
     extract_cal();
+    build_alpha_rcp();
     dbg[15]=(uint32_t)gainEE;
     mlx_write(0x8000,0x0030);
 
@@ -621,9 +756,9 @@ int main(void){
             if(act==raw) cnt++; else { raw=act; cnt=0; }
             if(cnt>=1 && act!=stable){
                 stable=act;
-                if(act==1){ pal_id=(pal_id+2)%3; pal_init(); }
-                else if(act==2){ pal_id=(pal_id+1)%3; pal_init(); }
-                else if(act==3){ gamma_id=(gamma_id+1)%4; pal_init(); }
+                if(act==1){ pal_id=(pal_id+3)%4; pal_init(); }
+                else if(act==2){ pal_id=(pal_id+1)%4; pal_init(); }
+                else if(act==3){ gamma_id=(gamma_id+1)%5; pal_init(); }
             }
             dbg[21]=(uint32_t)cur_pair;
         }
@@ -664,6 +799,21 @@ int main(void){
         int32_t tx=(int32_t)(mlx_to(max_idx)*100.f);
         dbg[16]=(uint32_t)tc; dbg[17]=(uint32_t)tn; dbg[18]=(uint32_t)tx;
         dbg[19]=(uint32_t)(int32_t)(f_ta*100.f);
+        /* mn_s/mx_s are those same two pixels in counts, so their ratio to the
+         * temperature difference is the scale factor -- no constant needed. */
+        /* Needs real thermal contrast to be well-conditioned: it is a ratio, and
+         * on a near-uniform scene the denominator is mostly noise. A 2 degC
+         * threshold let a 2.4 degC scene through and produced 10.50 counts/degC
+         * where the true value was ~5.7 -- nearly 2x wrong. Require 5 degC, and
+         * smooth it so a single bad frame cannot move it far. */
+        if(lg_valid && (tx-tn) > 500){
+            int32_t c = ((int32_t)(mx_i-mn_i)*10000)/(tx-tn);
+            if(c > 100 && c < 3000){
+                if(!cpd_primed){ cpd100 = c; cpd_primed = 1; }
+                else             cpd100 += (c - cpd100) >> 3;   /* ~8-frame EMA */
+            }
+        }
+        dbg[20]=(uint32_t)cpd100;
 
         /* don't feed the labels until the housekeeping values have validated once,
          * or the first frames after power-on show nonsense temperatures */

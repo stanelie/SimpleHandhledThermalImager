@@ -84,7 +84,10 @@ Current implementation runs at ~731 kHz (`I2C_HALF 3`). The MLX90640 tolerates u
 to 1 MHz; pushing past that makes it NACK everything.
 
 **The refresh rate register (`0x800D`, bits 9:7) is the real frame-rate limit.**
-The stock firmware leaves it at `011` = 4 Hz. This firmware sets `111` = 64 Hz.
+The stock firmware leaves it at `011` = 4 Hz. This firmware sets `110` = **32 Hz**
+with the ADC at **19-bit** (bits 11:10 = `11`), giving 16.2 fps. It ran at 64 Hz
+/ 18-bit for a long time; see [RP2040-COMPARISON.md](RP2040-COMPARISON.md) for
+why both changed.
 Note the register sets the *subpage* rate; a complete chess-pattern image needs
 two subpages.
 
@@ -132,8 +135,10 @@ Mitigations used here, in `cal.h`/`main.c`:
    is another chance to catch a mid-update word, and a `gain==0` fallback there
    multiplies every pixel by ~6200 and saturates the frame.
 
-Dropping the subpage rate to 32 Hz would make reads fit inside one update period
-and avoid this structurally, at the cost of roughly 3 fps.
+Dropping the subpage rate to 32 Hz makes reads fit inside one update period and
+avoids this structurally, at the cost of roughly 3 fps. **This was done, and it
+works**: measured over 442 frames at 32 Hz, `aux rejects 0, i2c fails 0, bus
+recoveries 0`, against a handful per thousand frames at 64 Hz.
 
 ### What the sensor actually gives you (measured)
 
@@ -163,6 +168,14 @@ Conclusions that drove the current design:
   matching the sqrt(2) expected from doubled integration time). FPN is unaffected
   by refresh rate. 64 Hz is used anyway, because the extra latency at 32 Hz is
   more objectionable in the hand than the noise it removes.
+- **Counts per degC is not a constant and must be measured, never hard-coded.**
+  It is ~8.6 at 18-bit and ~5.7-6.9 at 19-bit, and it drifts with gain and Ta.
+  The firmware derives it live into `cpd100` (`dbg[20]`) from the two pixels
+  whose temperature it already computes. Assuming the 18-bit value still held
+  after moving to 19-bit mis-sized the palette pad by 65% and made a hand render
+  green instead of orange. The estimator is a ratio, so it needs real contrast:
+  it refuses to update below 5 degC of span (2 degC let a 2.4 degC scene through
+  and produced a value nearly 2x wrong) and is EMA-smoothed.
 - Absolute counts are **not comparable across ADC resolutions** -- the LSB scale
   differs and a uniform target gives no calibrated signal to normalise against.
   Do not read the 18-bit vs 19-bit rows as a like-for-like comparison.

@@ -144,6 +144,63 @@ Two traps that wasted real time:
   temporal noise only, and was blind to the fixed pattern that was the actual
   complaint.
 
+## Recovering a bricked board (core in lockup)
+
+A flash erase that fails part-way leaves the vector table erased, so the reset
+vector is `0xFFFFFFFF`, the CPU faults at boot and ends in **lockup** --
+`pc: 0xfffffffe, msp: 0xffffffd8`. Two things then look alarming and are not:
+
+- **The screen stays dark.** The backlight is on PA8 under firmware control, so
+  a faulting CPU never turns it on. This is not a dead panel.
+- **`program` fails with `timed out waiting for flash`.** OpenOCD runs its flash
+  algorithm *on the target CPU*, which is impossible in lockup.
+
+The fix is `reset halt`, which halts at the reset vector via vector catch before
+anything executes:
+
+```sh
+openocd -f interface/stlink.cfg -c "adapter speed 100" -f target/stm32f1x.cfg \
+  -c "init" -c "reset halt" -c "program firmware.elf verify" -c "reset run" -c "shutdown"
+```
+
+Do **not** reach for `connect_assert_srst` -- it attaches fine but holds the core
+in reset, so programming still cannot run. (`adapter deassert_srst` is not a
+command in OpenOCD 0.12.)
+
+Diagnose power first: the ST-Link prints `Target voltage:` from the board's own
+rail. If that line is **absent**, the board is unpowered and nothing else you
+try will work. Note these ST-Link V2 clones also wedge after a failed flash,
+reporting nonsense like `STLINK V0J4S0 VID:PID 0000:0000`; replug them.
+
+## Dumping `frame[]` needs a breakpoint
+
+`frame[]` is read into directly by `mlx_read(0x0400, frame, 768)` and then
+corrected in place, so halting at an arbitrary moment gives a **half-updated
+array** -- part freshly-read raw words, part previous corrected values. It looks
+like real data and it is not. The tell is that the dumped minimum disagrees with
+the `r_base10` the firmware computed from it.
+
+Break at `render_band` instead, which is after correction, denoise and
+`render_prep`:
+
+```sh
+openocd ... -c "init" -c "halt" -c "bp <render_band> 2 hw" -c "resume" \
+  -c "wait_halt 5000" -c "mdh <frame> 768" -c "rbp <render_band>" -c "resume" -c "shutdown"
+```
+
+## Test a correction on a scene that can actually show it
+
+A **multiplicative** correction (per-pixel gain, e.g. `alpha`) produces an error
+proportional to signal. Tested against a near-ambient uniform surface, where the
+signal is ~30 counts, it correctly measures as negligible -- and that result is
+worthless, because the case that matters is a hand at ~150 counts. The same test
+on a warm target found a correlation of +0.549.
+
+Worse, the sign of the correlation **flips** between a target colder and warmer
+than the reflected reference, so a prediction made from one can look refuted by
+the other. Decide what signal level a correction needs to show up at, and test
+there.
+
 ## Debugging technique
 
 The firmware keeps a `volatile uint32_t dbg[]` array that OpenOCD reads out of a
