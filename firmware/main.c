@@ -36,6 +36,7 @@
 #define PC14 (1u<<14)
 #define PC15 (1u<<15)
 
+#define COLOR12 0
 #define LCD_W 320
 #define LCD_H 240
 #define SRC_W 32
@@ -767,7 +768,9 @@ static void render_prep(void){
  * rows beneath them are painted. Drawing them all at the end meant the blast
  * erased them for most of each frame -- that was the every-other-frame flicker. */
 static void render_band(int Y0,int Y1){
+#if COLOR12
     lcd_cmd(0x3A); lcd_dat(0x03);        /* COLMOD: 12 bit/px for the image */
+#endif
     lcd_window(0,LCD_W-1,(uint16_t)Y0,(uint16_t)Y1);
     GPIOA_BSRR=PA2;
     GPIOA_BRR =PA3;
@@ -797,25 +800,36 @@ static void render_band(int Y0,int Y1){
          * multiply instead of two. Fully unrolled with the weights as literals,
          * so there is no table load, no index arithmetic and no loop overhead
          * on the hottest loop in the firmware -- 64640 iterations per frame. */
-#define B12(W) pal12[a + (((d*(W))>>8))]
+#if COLOR12
+#define PL pal12
+#define EMIT(c1,c2) px_pair((c1),(c2))
+#else
+#define PL pal
+#define EMIT(c1,c2) do{ px_fast(c1); px_fast(c2); }while(0)
+#endif
+#define B12(W) PL[a + (((d*(W))>>8))]
         for(int sx=0; sx<SRC_W; sx++){
             int a = idxc[sx];
             if(!VIEW_INTERP){
-                uint16_t c = pal12[a];
-                px_pair(c,c); px_pair(c,c); px_pair(c,c); px_pair(c,c); px_pair(c,c);
+                uint16_t c = PL[a];
+                EMIT(c,c); EMIT(c,c); EMIT(c,c); EMIT(c,c); EMIT(c,c);
             } else {
                 int d = (int)idxc[sx+1] - a;
-                px_pair(pal12[a], B12(W1));
-                px_pair(B12(W2),  B12(W3));
-                px_pair(B12(W4),  B12(W5));
-                px_pair(B12(W6),  B12(W7));
-                px_pair(B12(W8),  B12(W9));
+                EMIT(PL[a],     B12(W1));
+                EMIT(B12(W2),   B12(W3));
+                EMIT(B12(W4),   B12(W5));
+                EMIT(B12(W6),   B12(W7));
+                EMIT(B12(W8),   B12(W9));
             }
         }
 #undef B12
+#undef EMIT
+#undef PL
     }
     GPIOA_BSRR=PA3;            /* release CS */
+#if COLOR12
     lcd_cmd(0x3A); lcd_dat(0x05);        /* back to 16 bit/px for the overlay */
+#endif
 }
 
 #include "gfx.h"
@@ -824,7 +838,8 @@ static void render_band(int Y0,int Y1){
  * described setting and an observed image can be matched up. It sits above the
  * thermal image rather than over it, so the render never paints across it and
  * it only redraws when something actually changes.
- *   P<n>  palette   0 reference / 1 rainbow / 2 ironbow / 3 grayscale
+ *   P<n>  palette   0 rainbow / 1 ironbow / 2 grayscale / 3 RP2040 reference
+ *                    (3 is the boot default, so the cycle reads 3,0,1,2)
  *   V<n>  view mode 0 filter+DDE / 1 raw blocks / 2 interp only / 3 filter, DDE off
  *   G<x>  gamma
  *   B<n>  box filter over n frames  (E = adaptive EMA instead)

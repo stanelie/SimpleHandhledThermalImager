@@ -39,7 +39,7 @@ ceiling, worth roughly another 2 fps.
 | control | action |
 |---|---|
 | middle button | toggle the OSD (when hidden, the image expands to the full 240 rows) |
-| wheel left / right | cycle palette: **RP2040 reference (default)** → rainbow → ironbow → grayscale |
+| wheel left / right | cycle palette **P**: 3 = RP2040 reference (default) → 0 = rainbow → 1 = ironbow → 2 = grayscale |
 | wheel push | cycle gamma: **1.0 linear (default)** → 4.0 → 3.0 → 2.0 → 1.5 |
 | second button | cycle view mode: interpolation+filter (white crosshair) → neither, raw 10×10 blocks (yellow) → interpolation only (magenta) |
 
