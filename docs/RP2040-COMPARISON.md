@@ -83,7 +83,7 @@ same truncating RGB565 as ours, so colour quantisation is not a factor.
   untrimmed max reintroduced the old "blue flash": one spiked pixel blows the
   span up and collapses every real pixel to index ~0, so the thermal image goes
   black for a frame while the separately-drawn info bar survives.
-- **Counts per degC is measured live** (`cpd100`, `dbg[20]`). It is *not* a
+- **Counts per degC is measured live** (`cpd100`, `dbg[23]`). It is *not* a
   constant: ~8.6 at 18-bit, ~5.7–6.9 at 19-bit, and it drifts with gain and Ta.
   A hard-coded value mis-sizes the pad, which is what made the hand render
   green instead of orange.
