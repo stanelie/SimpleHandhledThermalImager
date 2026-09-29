@@ -541,6 +541,7 @@ static void denoise(void){
  * currently spent spinning on the sensor's data-ready flag. */
 #define DDE_GAIN_DENOISE 16   /* 1.0x -- no boost, coring only */
 #define DDE_GAIN_ENHANCE 28   /* 1.75x */
+#define DDE_GAIN_STRONG  40   /* 2.5x, with a wider base */
 static int16_t dde_base[768];
 
 /* Median |difference| between horizontally adjacent pixels.
@@ -569,7 +570,12 @@ static int32_t noise_spatial(void){
 }
 
 static void dde(void){
-    const int32_t gain = (dde_mode==1) ? DDE_GAIN_DENOISE : DDE_GAIN_ENHANCE;
+    const int32_t gain = (dde_mode==1) ? DDE_GAIN_DENOISE
+                       : (dde_mode==3) ? DDE_GAIN_STRONG : DDE_GAIN_ENHANCE;
+    /* Base radius is the unsharp-mask "radius" control, and it usually matters
+     * more than gain: a wider base leaves MORE of each edge in the detail
+     * layer. 3x3 only catches the finest structure. */
+    const int rad = (dde_mode==3) ? 2 : 1;
     int32_t nz = noise_spatial();
     dbg[11]=(uint32_t)nz;
     /* The base differs by mode, and this is the whole point.
@@ -586,15 +592,17 @@ static void dde(void){
     const int32_t core = nz;                   /* below this, detail is noise */
     int32_t nsurv=0, sdet=0;
     /* 4096/n, so sum*rcp>>12 cannot overflow the way a 65536-scaled one would */
-    static const uint16_t rcp[10]={0,4096,2048,1365,1024,819,683,585,512,455};
+    static const uint16_t rcp[26]={0,4096,2048,1365,1024,819,683,585,512,455,
+                                   410,372,341,315,293,273,256,241,228,216,
+                                   205,195,186,178,171,164};
 
     for(int r=0;r<SRC_H;r++){
         for(int c=0;c<SRC_W;c++){
             int p=r*SRC_W+c;
             int32_t c0=frame[p], sum=c0; int n=1;
-            for(int dr=-1;dr<=1;dr++){
+            for(int dr=-rad;dr<=rad;dr++){
                 int rr=r+dr; if(rr<0||rr>=SRC_H) continue;
-                for(int dc=-1;dc<=1;dc++){
+                for(int dc=-rad;dc<=rad;dc++){
                     if(!dr && !dc) continue;
                     int cc=c+dc; if(cc<0||cc>=SRC_W) continue;
                     int32_t v=frame[rr*SRC_W+cc];
@@ -885,7 +893,8 @@ static void render_band(int Y0,int Y1){
  *   G<x>  gamma
  *   B<n>  box filter over n frames; 0 = off entirely (1 is skipped, being
  *         the identity), E = adaptive EMA instead
- *   D<n>  DDE: 0 off, 1 denoise (gain 1.0), 2 enhance (gain 1.75) */
+ *   D<n>  DDE: 0 off, 1 denoise, 2 enhance (3x3 base, 1.75x),
+ *         3 strong (5x5 base, 2.5x) */
 static int st_field(int x,int idx,int8_t lead,const int8_t *d,int nd){
     int8_t g[8]; int n=0;
     g[n++]=lead;
@@ -1096,7 +1105,7 @@ int main(void){
                             else    tfilt_n = (tfilt_n==0) ? TFILT_MAX
                                             : (tfilt_n<=2) ? 0 : tfilt_n-1;
                             hist_fill=0; hist_pos=0;                break;
-                    case 4: dde_mode = (dde_mode + 3 + d) % 3;      break;
+                    case 4: dde_mode = (dde_mode + 4 + d) % 4;      break;
                     case 6: ref_pipe = !ref_pipe;
                             hist_fill=0; hist_pos=0;                break;
                     case 5: refresh64 = !refresh64;
