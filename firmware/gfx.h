@@ -39,6 +39,7 @@ static const uint8_t font5x7[][5] = {
     {0x7F,0x49,0x49,0x49,0x41}, /* 24 E */
     {0x7F,0x08,0x08,0x08,0x7F}, /* 25 H */
     {0x7F,0x09,0x19,0x29,0x46}, /* 26 R */
+    {0x7F,0x09,0x09,0x09,0x01}, /* 27 F */
 };
 #define GL_DOT 10
 #define GL_SP  18
@@ -50,6 +51,7 @@ static const uint8_t font5x7[][5] = {
 #define GL_E   24
 #define GL_H   25
 #define GL_R   26
+#define GL_F   27
 #define C_SEL  RGB(255,230,0)   /* highlighted status field */
 
 static void fill_rect(int x,int y,int w,int h,uint16_t c){
