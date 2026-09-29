@@ -846,7 +846,8 @@ static void render_band(int Y0,int Y1){
  *                    (3 is the boot default, so the cycle reads 3,0,1,2)
  *   V<n>  view mode 0 filter+DDE / 1 raw blocks / 2 interp only / 3 filter, DDE off
  *   G<x>  gamma
- *   B<n>  box filter over n frames  (E = adaptive EMA instead)
+ *   B<n>  box filter over n frames; 0 = off entirely (1 is skipped, being
+ *         the identity), E = adaptive EMA instead
  *   D<n>  DDE on/off */
 static int st_field(int x,int idx,int8_t lead,const int8_t *d,int nd){
     int8_t g[8]; int n=0;
@@ -1048,9 +1049,15 @@ int main(void){
                     case 0: pal_id=(pal_id+4+d)%4;      pal_init(); break;
                     case 1: view_mode=(view_mode+3+d)%3;            break;
                     case 2: gamma_id=(gamma_id+5+d)%5;  pal_init(); break;
-                    case 3: tfilt_n += d;
-                            if(tfilt_n<1) tfilt_n=TFILT_MAX;
-                            else if(tfilt_n>TFILT_MAX) tfilt_n=1;
+                    /* B cycles 0, 2, 3 ... TFILT_MAX. 1 is skipped because a
+                     * one-frame rolling average returns the frame unchanged --
+                     * it is the identity, but still copies 768 pixels into the
+                     * history and divides them all by one. 0 is a real bypass:
+                     * denoise() is not called at all. */
+                    case 3: if(d>0) tfilt_n = (tfilt_n==0) ? 2
+                                            : (tfilt_n>=TFILT_MAX) ? 0 : tfilt_n+1;
+                            else    tfilt_n = (tfilt_n==0) ? TFILT_MAX
+                                            : (tfilt_n<=2) ? 0 : tfilt_n-1;
                             hist_fill=0; hist_pos=0;                break;
                     case 4: dde_on = !dde_on;                       break;
                     case 6: ref_pipe = !ref_pipe;
@@ -1180,7 +1187,7 @@ int main(void){
 
 #ifndef DIAG
 #if FILTER_BOX
-        if(VIEW_FILTER) denoise(); else hist_fill=0;
+        if(VIEW_FILTER && tfilt_n>=2) denoise(); else hist_fill=0;
 #else
         if(VIEW_FILTER) denoise(); else acc_primed=0;
 #endif

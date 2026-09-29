@@ -47,6 +47,7 @@ ceiling, worth roughly another 2 fps.
 | control | action |
 |---|---|
 | middle button | toggle the OSD (when hidden, the image expands to the full 240 rows) |
+| **B** | temporal filter: **0 = off**, then 2 or 3 frames. 1 is skipped — a one-frame rolling average is the identity |
 | **boot default** | **P3 V0 G1.0 B3 D1 H32 R0** — reference palette and range, interpolation with a 3-frame average, linear gamma, DDE on, 32 Hz |
 | wheel left / right | cycle palette **P**: 3 = RP2040 reference (default) → 0 = rainbow → 1 = ironbow → 2 = grayscale |
 | wheel push | cycle gamma: **1.0 linear (default)** → 4.0 → 3.0 → 2.0 → 1.5 |
