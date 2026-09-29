@@ -96,6 +96,40 @@ a frame, in the hottest loop in the firmware at 64,640 iterations.
 | **12-bit colour (RGB444)** | 93 distinct palette colours against RGB565's 226; visibly destroys gradation for ~1.4 ms, which did not move the frame counter |
 | **`I2C_HALF 1`** | sensor ACKs but returns corrupted data — 147 rejects in 147 frames |
 
+## Flat-field / FPN correction: tried twice, rejected twice
+
+Do not implement this a third time without reading this section.
+
+The second attempt was button-triggered (no automatic firing), averaged over 32
+frames (so the table's own temporal noise was ~0.7 counts rather than ~4.2), and
+captured against surfaces the user chose. It was still rejected, on a two-pass
+test — capture two different uniform surfaces, correlate the tables:
+
+| | |
+|---|---|
+| r over all 768 pixels | **+0.514** |
+| r on the **high-pass** part | **+0.436** |
+
+At r ≈ 0.5 the table is about half real structure and half noise, so applying it
+removes ~1.4 counts of genuine fixed error while writing in ~1.4 counts of new
+fixed error. A wash.
+
+**The decisive detail is that the high-pass correlation is LOWER than the
+overall one.** Fixed-pattern noise is by definition pixel-to-pixel, so a genuine
+FPN table would be *more* reproducible in its high-frequency part, not less. The
+reproducible component here is smooth — i.e. lens vignetting, which is
+multiplicative and would need a gain correction, not an offset one.
+
+Confirmed visually: no stuck or static pixels on this sensor, only random noise.
+`poff[]` already removes the fixed pattern; what remains is temporal.
+
+> **A warning about the metric.** `noise_spatial()` measures the median
+> |horizontal difference|, which counts **real scene detail** as well as noise —
+> and scene detail is exactly as constant under temporal averaging as FPN is.
+> Decomposing a B-sweep as "temporal vs fixed" therefore overstates the fixed
+> part, and I used that decomposition to justify retrying the flat-field. Do not
+> read a non-averaging-away residual as evidence of correctable sensor error.
+
 ## The hard floor
 
 I2C is **18.1 ms** and cannot be improved: the sensor corrupts data above this

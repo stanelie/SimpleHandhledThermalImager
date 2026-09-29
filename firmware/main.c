@@ -59,8 +59,11 @@
  * lag is (N-1)/2 frames, both exactly predictable.
  * It has no motion adaptation at all, so movement smears over the window. */
 #define FILTER_BOX 1
-#define TFILT_MAX  3              /* RAM cap: TFILT_MAX * 768 * 2 bytes.
-                                   * 4 before the per-pixel tables took 3 KB. */
+/* RAM cap: TFILT_MAX * 768 * 2 bytes. Back to 4 now that the flat-field table
+ * has been removed -- and worth having, because this sensor's visible noise is
+ * essentially ALL temporal (see docs/PERFORMANCE.md), so averaging is the only
+ * lever and it scales as sqrt(N). */
+#define TFILT_MAX  4
 
 #define NLO 39         /* 5th percentile of 768 = the 38th coldest, plus index 0 */
 #define SPAN_MIN 52        /* minimum displayed span in raw counts (~6 degC) */
@@ -131,7 +134,7 @@ static int dde_on    = 1;
 static int tfilt_n   = TFILT_MAX;   /* 3-frame rolling average */
 static int refresh64 = (REFRESH_SEL == 7);
 static int sel       = 0;   /* which status field the wheel adjusts: P V G B D H R */
-#define SEL_N 8
+#define SEL_N 7
 
 /* R: 0 = our pipeline, 1 = the RP2040 reference pipeline reproduced faithfully.
  * R1 runs the full Melexis CalculateTo on ALL 768 pixels -- the one stage we
@@ -142,22 +145,6 @@ static int sel       = 0;   /* which status field the wheel adjusts: P V G B D H
  * his image look different, not to be shipped. */
 static int ref_pipe = 0;
 
-/* Flat-field (FPN) correction. Retried because the residual fixed-pattern noise
- * measures ~2.9 counts and is now the dominant term -- the temporal filter
- * halves its own component and stops there.
- * Captured ONLY on an explicit button press, against a uniform surface the user
- * chooses. The previous attempt fired automatically (and, thanks to an ADC
- * start-up bug, on every boot) against whatever happened to be in front of it,
- * and a two-pass test showed the table collapsing 64% -- it was recording the
- * scene, not the sensor.
- * Averaged over FLAT_N frames: a single-frame capture would bake ~4.2 counts of
- * TEMPORAL noise into a permanent table in order to remove ~2.9 counts of fixed
- * noise, which is strictly worse. At 32 frames the table's own noise is ~0.7
- * counts. */
-#define FLAT_N 32
-static int16_t flat[768];
-static int flat_on  = 0;
-static int flat_cap = 0;        /* frames remaining in a capture; 0 = idle */
 static int cur_pair = 0;
 
 static void delay_us(uint32_t us);
@@ -612,14 +599,25 @@ static void dde(void){
 
 #include "cal.h"
 
-/* Flat-field / non-uniformity correction.
+/* No flat-field / non-uniformity correction, and this is deliberate -- it has
+ * now been tried and rejected TWICE.
  *
- * Measured FPN is ~3.3 counts against a ~50-count scene span, which at 10x
- * upscale reads as a grid of blobs. Rather than chase its origin in the
- * calibration maths, measure it: average frames of a uniform surface and store
- * each pixel's deviation. High-passed against a 3x3 local mean so a target that
- * isn't perfectly flat (or lens vignetting) is not baked in. Applied
- * incrementally, so repeated calibrations converge. */
+ * The second attempt (button-triggered, 32-frame averaged, against surfaces the
+ * user chose) was measured with a two-pass test: capture two different uniform
+ * surfaces and correlate the tables. Result r = +0.514 overall, and only
+ * +0.436 on the high-pass part. That is roughly half real structure and half
+ * noise, so applying it removes ~1.4 counts of genuine fixed error while
+ * writing in ~1.4 counts of new fixed error -- a wash.
+ *
+ * The decisive detail: the high-pass correlation is LOWER than the overall one.
+ * The reproducible component is SMOOTH, not pixel-to-pixel, so what the capture
+ * finds is lens vignetting rather than fixed-pattern noise. Vignetting is
+ * multiplicative and would need a gain correction, not this offset one.
+ *
+ * Confirmed by eye: no stuck or static pixels are visible on this sensor, only
+ * random noise. poff[] already removes the fixed pattern, and what is left is
+ * temporal -- which is why the temporal filter (B) is the only lever that
+ * helps, and why TFILT_MAX is worth spending RAM on. */
 
 #ifdef DIAG
 /* Characterise the sensor with the display pipeline out of the way.
@@ -894,13 +892,12 @@ static void draw_fps_if_changed(void){
 }
 
 static void draw_status_if_changed(void){
-    static int l_p=-1,l_v=-1,l_g=-1,l_on=-1,l_b=-1,l_d=-1,l_h=-1,l_s=-1,l_r=-1,l_fo=-1,l_fc=-1;
+    static int l_p=-1,l_v=-1,l_g=-1,l_on=-1,l_b=-1,l_d=-1,l_h=-1,l_s=-1,l_r=-1;
     if(pal_id==l_p && view_mode==l_v && gamma_id==l_g && overlay_on==l_on
        && tfilt_n==l_b && dde_on==l_d && refresh64==l_h && sel==l_s
-       && ref_pipe==l_r && flat_on==l_fo && (flat_cap>0)==l_fc) return;
+       && ref_pipe==l_r) return;
     l_p=pal_id; l_v=view_mode; l_g=gamma_id; l_on=overlay_on;
     l_b=tfilt_n; l_d=dde_on; l_h=refresh64; l_s=sel; l_r=ref_pipe;
-    l_fo=flat_on; l_fc=(flat_cap>0);
 
     fill_rect(0,0,LCD_W,TOP_H,C_BLACK);
     fps_dirty=1;              /* the wipe took the fps with it */
@@ -920,7 +917,6 @@ static void draw_status_if_changed(void){
     d[0]=(int8_t)(dde_on?1:0);                 x=st_field(x,4,GL_D,d,1);
     d[0]=refresh64?6:3; d[1]=refresh64?4:2;    x=st_field(x,5,GL_H,d,2);
     d[0]=(int8_t)(ref_pipe?1:0);               x=st_field(x,6,GL_R,d,1);
-    d[0]=(int8_t)(flat_cap?8:(flat_on?1:0));   x=st_field(x,7,GL_F,d,1);
     (void)x;
 }
 
@@ -1050,7 +1046,7 @@ int main(void){
             if(cnt>=2 && b!=stable){
                 stable=b;
                 if(b==1) overlay_on=!overlay_on;      /* 2045 level toggles overlay */
-                else if(b==2) flat_cap = FLAT_N;   /* start a flat-field capture */  /* 0 level: cycle view mode */
+                else if(b==2) view_mode=(view_mode+1)%3;  /* 0 level: cycle view mode */
             }
         }
         bucket(0,adcnow[0]); bucket(1,adcnow[1]);
@@ -1079,7 +1075,6 @@ int main(void){
                                             : (tfilt_n<=2) ? 0 : tfilt_n-1;
                             hist_fill=0; hist_pos=0;                break;
                     case 4: dde_on = !dde_on;                       break;
-                    case 7: flat_on = !flat_on;                     break;
                     case 6: ref_pipe = !ref_pipe;
                             hist_fill=0; hist_pos=0;                break;
                     case 5: refresh64 = !refresh64;
@@ -1202,21 +1197,6 @@ int main(void){
         }
 
         if(!ref_pipe) correct_frame();
-        if(flat_cap > 0){
-            if(flat_cap == FLAT_N) for(int i=0;i<768;i++) flat[i]=0;
-            for(int i=0;i<768;i++) flat[i] += frame[i];
-            if(--flat_cap == 0){
-                int32_t acc=0;
-                for(int i=0;i<768;i++) acc += flat[i];
-                int32_t m = acc/768;          /* the frame mean, summed over N */
-                for(int i=0;i<768;i++){
-                    int32_t v = ((int32_t)flat[i] - m)/FLAT_N;
-                    flat[i] = (int16_t)(v>32767?32767:(v<-32768?-32768:v));
-                }
-                flat_on = 1;
-            }
-        }
-        else if(flat_on) for(int i=0;i<768;i++) frame[i] -= flat[i];
 
         dbg[14]=aux_rejects;
 
