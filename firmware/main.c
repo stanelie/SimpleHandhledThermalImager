@@ -115,7 +115,11 @@ static int img_h = LCD_H-BAR_H-TOP_H;
 #define GPIOB_IDR   REG(0x40010C08)
 #define GPIOB_BSRR  REG(0x40010C10)
 #define GPIOC_BSRR2 REG(0x40011010)
-static int overlay_on = 1;
+static int overlay_on = 1;   /* bottom bar + crosshair; middle button */
+/* The top status bar is separate and OFF by default: it is a settings menu, not
+ * part of the readout. Long-press the wheel to show or hide it. */
+static int menu_on = 0;
+#define MENU_LONG_FRAMES 12   /* ~0.6 s at 20 fps */
 /* View mode, cycled by the second button. Lets processing artefacts be told
  * apart from sensor behaviour. Gain/offset calibration stays on in every mode --
  * without it the EEPROM fixed-pattern swamps everything and you learn nothing.
@@ -911,9 +915,9 @@ static int fps_dirty = 1;
  * repaints over it and this only runs when the number actually changes. */
 static void draw_fps_if_changed(void){
     static int l_f=-1, l_on=-1;
-    if(!fps_dirty && fps_disp==l_f && overlay_on==l_on) return;
-    fps_dirty=0; l_f=fps_disp; l_on=overlay_on;
-    if(!overlay_on) return;
+    if(!fps_dirty && fps_disp==l_f && menu_on==l_on) return;
+    fps_dirty=0; l_f=fps_disp; l_on=menu_on;
+    if(!menu_on) return;
     int v=fps_disp; if(v>99) v=99; if(v<0) v=0;
     int8_t g[4]; int n=0;
     if(v>=10) g[n++]=(int8_t)(v/10);
@@ -924,15 +928,15 @@ static void draw_fps_if_changed(void){
 
 static void draw_status_if_changed(void){
     static int l_p=-1,l_v=-1,l_g=-1,l_on=-1,l_b=-1,l_d=-1,l_h=-1,l_s=-1,l_r=-1;
-    if(pal_id==l_p && view_mode==l_v && gamma_id==l_g && overlay_on==l_on
+    if(pal_id==l_p && view_mode==l_v && gamma_id==l_g && menu_on==l_on
        && tfilt_n==l_b && dde_mode==l_d && refresh64==l_h && sel==l_s
        && ref_pipe==l_r) return;
-    l_p=pal_id; l_v=view_mode; l_g=gamma_id; l_on=overlay_on;
+    l_p=pal_id; l_v=view_mode; l_g=gamma_id; l_on=menu_on;
     l_b=tfilt_n; l_d=dde_mode; l_h=refresh64; l_s=sel; l_r=ref_pipe;
 
     fill_rect(0,0,LCD_W,TOP_H,C_BLACK);
     fps_dirty=1;              /* the wipe took the fps with it */
-    if(!overlay_on) return;
+    if(!menu_on) return;
 
     static const int8_t gdig[5][3] = {{4,GL_DOT,0},{3,GL_DOT,0},{2,GL_DOT,0},
                                       {1,GL_DOT,5},{1,GL_DOT,0}};
@@ -1084,11 +1088,25 @@ int main(void){
         {   /* measured settled codes on this unit: 3=left 6=right 5=push */
             cur_pair = scan_wheel();
             int act = (cur_pair==3)?1 : (cur_pair==6)?2 : (cur_pair==5)?3 : 0;
-            static int raw=0, cnt=0, stable=0;
+            static int raw=0, cnt=0, stable=0, held=0, consumed=0;
             if(act==raw) cnt++; else { raw=act; cnt=0; }
+            /* Long-press the wheel to show/hide the menu. The toggle fires at
+             * the threshold rather than on release, so the feedback is
+             * immediate, and `consumed` then suppresses the short-press action
+             * when the button comes back up. */
+            if(act==3 && stable==3){
+                if(++held==MENU_LONG_FRAMES){ menu_on=!menu_on; consumed=1; }
+            } else if(act!=3) held=0;
             if(cnt>=1 && act!=stable){
+                int was=stable;
                 stable=act;
-                if(act==3){ sel=(sel+1)%SEL_N; }          /* push: next field */
+                /* The push acts on RELEASE, not on press -- otherwise a long
+                 * press would advance the field first and only then toggle the
+                 * menu, doing both. */
+                if(was==3 && act==0){
+                    if(consumed) consumed=0;              /* it was a long press */
+                    else sel=(sel+1)%SEL_N;               /* short press */
+                }
                 else if(act==1 || act==2){                 /* left/right: adjust */
                     int d = (act==2) ? 1 : -1;
                     switch(sel){
@@ -1246,8 +1264,8 @@ int main(void){
 
         t=CYC;
         { uint32_t tp=CYC; render_prep(); dbg[25]=CYC-tp; }
-        img_y0 = overlay_on ? TOP_H : 0;
-        img_h  = overlay_on ? (LCD_H-BAR_H-TOP_H) : LCD_H;
+        img_y0 = menu_on ? TOP_H : 0;
+        img_h  = LCD_H - img_y0 - (overlay_on ? BAR_H : 0);
         /* One band, then the crosshair on top. This used to be two bands with
          * the crosshair drawn between them, so the second band would not
          * repaint its lower half. Drawing it after the whole image is simpler,
