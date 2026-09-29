@@ -572,8 +572,19 @@ static void dde(void){
     const int32_t gain = (dde_mode==1) ? DDE_GAIN_DENOISE : DDE_GAIN_ENHANCE;
     int32_t nz = noise_spatial();
     dbg[11]=(uint32_t)nz;
-    const int32_t sim  = nz*3;                 /* "same surface" threshold */
+    /* The base differs by mode, and this is the whole point.
+     * DENOISE wants an EDGE-AWARE base: edges stay in the base, the detail
+     * layer holds only sub-edge texture, and coring deletes it. Clean edges,
+     * no noise.
+     * ENHANCE wants a SMOOTH base: edges land in the DETAIL layer, where the
+     * gain can boost them. That is what unsharp masking is, and the coring is
+     * what stops it amplifying noise at the same time.
+     * Using the edge-aware base for both was a mistake -- it followed edges so
+     * faithfully that only 19% of pixels had any detail left and the mean
+     * surviving detail was 2 counts, so D1 and D2 were indistinguishable. */
+    const int32_t sim  = (dde_mode==1) ? nz*3 : 32767;
     const int32_t core = nz;                   /* below this, detail is noise */
+    int32_t nsurv=0, sdet=0;
     /* 4096/n, so sum*rcp>>12 cannot overflow the way a 65536-scaled one would */
     static const uint16_t rcp[10]={0,4096,2048,1365,1024,819,683,585,512,455};
 
@@ -598,10 +609,12 @@ static void dde(void){
         int32_t d=(int32_t)frame[i]-(int32_t)dde_base[i];
         int32_t ad=d<0?-d:d;
         if(ad<=core) d=0;
-        else{ d = (d>0)?(d-core):(d+core); d = (d*gain)>>4; }
+        else{ d = (d>0)?(d-core):(d+core); d = (d*gain)>>4; nsurv++; sdet+=(d<0?-d:d); }
         int32_t v=(int32_t)dde_base[i]+d;
         frame[i]=(int16_t)(v>32767?32767:(v<-32768?-32768:v));
     }
+    dbg[13]=(uint32_t)nsurv;                 /* pixels whose detail survived coring */
+    dbg[20]=(uint32_t)(nsurv?sdet/nsurv:0);  /* mean surviving detail, counts */
 }
 #endif
 
