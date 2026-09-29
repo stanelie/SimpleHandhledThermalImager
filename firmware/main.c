@@ -102,6 +102,16 @@ static int min_idx=400, max_idx=400;
 
 /* label values, averaged and refreshed at most 3x/sec */
 static int32_t disp_c, disp_n, disp_x;
+
+/* Battery, from the PA0 divider that HARDWARE.md identified as a monitor. The
+ * endpoints are PROVISIONAL: 3200 counts was observed on a charged pack, and
+ * 2300 is a Li-ion 3.0 V cell assuming the same divider ratio -- not measured.
+ * dbg[21] carries the smoothed raw reading so they can be calibrated against a
+ * pack that is actually run down. */
+#define BATT_FULL  3200
+#define BATT_EMPTY 2300
+static int32_t batt_adc = 0;
+static int batt_pct = 100;
 #define CENTER_IDX 400
 #define BAR_H  20
 #define TOP_H  18                 /* status bar: 7*GSC glyph + 2px box on each side */
@@ -1068,6 +1078,16 @@ int main(void){
               fps_n=0; fps_t0=CYC;
           } }
         adcnow[0]=adc_read(0); adcnow[1]=adc_read(1);
+        /* The first conversions after calibration read 0 -- the same start-up
+         * quirk that used to fire a button action at every boot -- so ignore
+         * them rather than showing a flat battery for the first few frames. */
+        if(adcnow[0] > 500){
+            if(batt_adc==0) batt_adc = (int32_t)adcnow[0];
+            else batt_adc += ((int32_t)adcnow[0] - batt_adc) >> 4;
+            int32_t pc = ((batt_adc - BATT_EMPTY)*100)/(BATT_FULL - BATT_EMPTY);
+            batt_pct = (int)(pc<0 ? 0 : (pc>100 ? 100 : pc));
+        }
+        dbg[21]=(uint32_t)batt_adc;
         {   uint32_t lv=adcnow[1];
             int b = (lv<1000)?2 : (lv<3000)?1 : 0;
             /* The ADC's first conversions read 0 before it settles, which decodes

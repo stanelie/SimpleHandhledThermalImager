@@ -128,10 +128,24 @@ static void draw_crosshair(void){
 
 /* The status bar lives above the image and is never repainted by the blast,
  * so it is redrawn only when a value actually changes -- no tearing. */
+/* Battery icon: outline, terminal nub, proportional fill.
+ * Colour carries the warning, since a small bar is hard to judge by length. */
+static void draw_battery(int x,int y,int pct){
+    if(pct<0) pct=0; else if(pct>100) pct=100;
+    uint16_t col = (pct<20) ? C_RED : (pct<50) ? RGB(255,200,0) : RGB(80,230,80);
+    fill_rect(x,     y,   24, 11, col);        /* body  */
+    fill_rect(x+1,   y+1, 22,  9, C_BLACK);    /* hollow it out */
+    fill_rect(x+24,  y+3,  2,  5, col);        /* terminal */
+    int w = (pct*20+50)/100;
+    if(w>0) fill_rect(x+2, y+2, w, 7, col);
+}
+
 static void draw_bar_if_changed(void){
     static int32_t l_n=0x7FFFFFFF, l_c=0, l_x=0; static int l_on=-1, l_p=-1;
-    if(disp_n==l_n && disp_c==l_c && disp_x==l_x && overlay_on==l_on && cur_pair==l_p) return;
-    l_n=disp_n; l_c=disp_c; l_x=disp_x; l_on=overlay_on; l_p=cur_pair;
+    static int l_bp=-1;
+    if(disp_n==l_n && disp_c==l_c && disp_x==l_x && overlay_on==l_on
+       && cur_pair==l_p && batt_pct==l_bp) return;
+    l_n=disp_n; l_c=disp_c; l_x=disp_x; l_on=overlay_on; l_p=cur_pair; l_bp=batt_pct;
 
     fill_rect(0,BAR_Y0,LCD_W,BAR_H,C_BLACK);
     if(!overlay_on) return;
@@ -141,4 +155,5 @@ static void draw_bar_if_changed(void){
     fmt_temp(disp_n, g);  draw_glyphs(4, BAR_Y0+3, g, C_CYAN, C_BLACK);
     fmt_temp(disp_c, g);  draw_glyphs((LCD_W-glyphs_w(g))/2, BAR_Y0+3, g, C_WHITE, C_BLACK);
     fmt_temp(disp_x, g);  draw_glyphs(LCD_W-4-glyphs_w(g), BAR_Y0+3, g, C_RED, C_BLACK);
+    draw_battery(LCD_W*3/4 - 13, BAR_Y0+4, batt_pct);
 }

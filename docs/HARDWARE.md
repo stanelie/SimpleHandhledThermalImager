@@ -264,8 +264,23 @@ share one pin, distinguished by voltage:
 > this went unnoticed for a while because the action it triggered was a
 > calibration whose effect was hard to see.
 
-PA0 is also analog but sits constant at ~3201 (~2.58 V) and never moves — it is
-almost certainly a **battery monitor**, not an input.
+PA0 is also analog and is the **battery monitor**. It reads ~3200 counts
+(~2.58 V) on a charged pack — confirmed against the icon in the bottom bar,
+which reads it via `adcnow[0]`.
+
+> **A flat battery silently kills the temperature readout while the image looks
+> normal.** `calc_frame_params` rejects VDD below 3.0 V, and `lg_valid` is only
+> ever set, never cleared — so a camera that *boots* on a low battery never
+> validates once, and `disp_c/n/x` stay at their initial zero forever. Meanwhile
+> `lg_gfp` falls back to 1024 and `correct_frame` degrades to `frame - poff`,
+> which renders fine. The symptom is a perfectly good picture with all three
+> temperatures reading `0C`. Check the battery icon before suspecting the
+> temperature chain.
+
+The "empty" end of the battery scale (`BATT_EMPTY`, 2300 counts) is **assumed**,
+not measured — it is a 3.0 V Li-ion cell through the same divider ratio. `dbg[21]`
+carries the smoothed raw reading, so note it on a genuinely run-down pack and
+set the constant from that.
 
 The stock firmware reads both via ADC with DMA; that is how the ladder was found
 (see the ADC setup around `0x8001340`).
