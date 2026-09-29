@@ -48,7 +48,8 @@ ceiling, worth roughly another 2 fps.
 |---|---|
 | middle button | toggle the OSD (when hidden, the image expands to the full 240 rows) |
 | **B** | temporal filter: **0 = off**, then 2 or 3 frames. 1 is skipped — a one-frame rolling average is the identity |
-| **boot default** | **P3 V0 G1.0 B3 D1 H32 R0** — reference palette and range, interpolation with a 3-frame average, linear gamma, DDE on, 32 Hz |
+| **boot default** | **P3 V0 G1.0 B4 D1 H32 R0** — reference palette and range, interpolation with a 4-frame average, linear gamma, DDE in denoise mode, 32 Hz |
+| **D** | DDE: 0 off, 1 denoise (edge-aware base, gain 1.0), 2 enhance (3×3 base, 1.75×), 3 strong (5×5 base, 2.5×) |
 | wheel left / right | cycle palette **P**: 3 = RP2040 reference (default) → 0 = rainbow → 1 = ironbow → 2 = grayscale |
 | wheel push | cycle gamma: **1.0 linear (default)** → 4.0 → 3.0 → 2.0 → 1.5 |
 | second button | cycle view mode: interpolation+filter (white crosshair) → neither, raw 10×10 blocks (yellow) → interpolation only (magenta) |

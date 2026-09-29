@@ -137,7 +137,7 @@ int view_mode = 0;   /* interpolation + temporal filter */
  * a SPATIAL one -- which works where the per-pixel temporal gate failed,
  * because its fallback value is the local average rather than a stale previous
  * value, so there is nothing to go stale and nothing to ghost. */
-static int dde_mode  = 2;
+static int dde_mode  = 1;   /* denoise */
 static int tfilt_n   = TFILT_MAX;   /* 3-frame rolling average */
 static int refresh64 = (REFRESH_SEL == 7);
 static int sel       = 0;   /* which status field the wheel adjusts: P V G B D H R */
