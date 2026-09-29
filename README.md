@@ -51,7 +51,8 @@ ceiling, worth roughly another 2 fps.
 | **boot default** | **P3 V0 G1.0 B4 D1 H32 R0** — reference palette and range, interpolation with a 4-frame average, linear gamma, DDE in denoise mode, 32 Hz |
 | **D** | DDE: 0 off, 1 denoise (edge-aware base, gain 1.0), 2 enhance (3×3 base, 1.75×), 3 strong (5×5 base, 2.5×) |
 | wheel left / right | cycle palette **P**: 3 = RP2040 reference (default) → 0 = rainbow → 1 = ironbow → 2 = grayscale |
-| wheel push | cycle gamma: **1.0 linear (default)** → 4.0 → 3.0 → 2.0 → 1.5 |
+| wheel push (short) | advance to the next menu field — only while the menu bar is shown |
+| wheel push (long, ~0.6 s) | show / hide the top menu bar; hiding it parks the selection on the palette |
 | second button | cycle view mode: interpolation+filter (white crosshair) → neither, raw 10×10 blocks (yellow) → interpolation only (magenta) |
 
 ## Noise, and what actually helps

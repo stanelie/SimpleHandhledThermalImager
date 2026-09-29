@@ -1095,7 +1095,11 @@ int main(void){
              * immediate, and `consumed` then suppresses the short-press action
              * when the button comes back up. */
             if(act==3 && stable==3){
-                if(++held==MENU_LONG_FRAMES){ menu_on=!menu_on; consumed=1; }
+                if(++held==MENU_LONG_FRAMES){
+                    menu_on=!menu_on;
+                    if(!menu_on) sel=0;    /* hiding the menu parks on the palette */
+                    consumed=1;
+                }
             } else if(act!=3) held=0;
             if(cnt>=1 && act!=stable){
                 int was=stable;
@@ -1105,7 +1109,12 @@ int main(void){
                  * menu, doing both. */
                 if(was==3 && act==0){
                     if(consumed) consumed=0;              /* it was a long press */
-                    else sel=(sel+1)%SEL_N;               /* short press */
+                    /* Only cycle fields while the menu is visible. With it
+                     * hidden there is no way to see which field is selected, so
+                     * a blind short press could change the refresh rate or the
+                     * view mode without any indication. Parked on the palette,
+                     * left/right stays useful and harmless. */
+                    else if(menu_on) sel=(sel+1)%SEL_N;
                 }
                 else if(act==1 || act==2){                 /* left/right: adjust */
                     int d = (act==2) ? 1 : -1;
