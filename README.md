@@ -46,14 +46,28 @@ ceiling, worth roughly another 2 fps.
 
 | control | action |
 |---|---|
-| middle button | toggle the OSD (when hidden, the image expands to the full 240 rows) |
-| **B** | temporal filter: **0 = off**, then 2 or 3 frames. 1 is skipped — a one-frame rolling average is the identity |
-| **boot default** | **P3 V0 G1.0 B4 D1 H32 R0** — reference palette and range, interpolation with a 4-frame average, linear gamma, DDE in denoise mode, 32 Hz |
-| **D** | DDE: 0 off, 1 denoise (edge-aware base, gain 1.0), 2 enhance (3×3 base, 1.75×), 3 strong (5×5 base, 2.5×) |
-| wheel left / right | cycle palette **P**: 3 = RP2040 reference (default) → 0 = rainbow → 1 = ironbow → 2 = grayscale |
-| wheel push (short) | advance to the next menu field — only while the menu bar is shown |
-| wheel push (long, ~0.6 s) | show / hide the top menu bar; hiding it parks the selection on the palette |
-| second button | cycle view mode: interpolation+filter (white crosshair) → neither, raw 10×10 blocks (yellow) → interpolation only (magenta) |
+| **wheel left / right** | adjust the selected field |
+| **wheel push, short** | next field — *only while the menu bar is shown* |
+| **wheel push, long** (~0.6 s) | show / hide the top menu bar. Hiding it parks the selection on the palette, so a blind nudge cannot change something invisible |
+| **middle button** | toggle the bottom bar and crosshair |
+| **second button** | cycle the view mode `V` |
+
+The top menu bar is **off by default** — it is a settings menu, not part of the
+readout. It reads `P V G B D H R` with the selected field in yellow, and the
+measured frame rate at the right.
+
+| field | values |
+|---|---|
+| **P** palette | 3 = RP2040 reference (default) · 0 = rainbow · 1 = ironbow · 2 = grayscale |
+| **V** view | 0 = interpolation + filter · 1 = raw 10×10 blocks · 2 = interpolation only |
+| **G** gamma | 1.0 linear (default) · 4.0 · 3.0 · 2.0 · 1.5 |
+| **B** temporal filter | **0 = off** · 2 · 3 · 4 frames. 1 is skipped: a one-frame rolling average is the identity |
+| **D** DDE | 0 = off · **1 = denoise** (edge-aware base, gain 1.0) · 2 = enhance (3×3 base, 1.75×) · 3 = strong (5×5 base, 2.5×) |
+| **H** refresh | 32 (default) / 64 Hz, written to the sensor and read back to confirm |
+| **R** pipeline | 0 = ours · 1 = the RP2040 reference pipeline, full per-pixel radiometry |
+
+**Boot default: `P3 V0 G1.0 B4 D1 H32 R0`** — reference palette and range,
+interpolation with a 4-frame average, linear gamma, DDE denoising, 32 Hz.
 
 ## Noise, and what actually helps
 

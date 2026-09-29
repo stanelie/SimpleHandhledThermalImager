@@ -130,6 +130,60 @@ Confirmed visually: no stuck or static pixels on this sensor, only random noise.
 > part, and I used that decomposition to justify retrying the flat-field. Do not
 > read a non-averaging-away residual as evidence of correctable sensor error.
 
+## Noise reduction: what the stages actually do
+
+**The residual noise on this sensor is essentially all temporal.** No stuck or
+static pixels are visible, `poff[]` already removes the fixed pattern, and a
+flat-field retry was rejected (above). So averaging is the only lever that
+attacks the noise itself — everything else attacks its *appearance*.
+
+**A per-pixel temporal noise gate does not work here**, and this was tried: the
+filter behind `FILTER_BOX 0` thresholds each pixel's frame-to-frame change
+against multiples of the measured noise. Three reasons it fails, which are worth
+understanding before anyone proposes it again:
+
+- **"below threshold" means stale, not silent.** An audio gate mutes, which is
+  correct. A video gate holds the previous value, which is visible as smearing.
+- **it does not reduce noise, it makes it intermittent.** Below threshold signal
+  and noise both freeze; above it, noise passes at full amplitude. Averaging
+  reduces noise *power* by √N. And intermittent noise reads worse, because the
+  eye tracks change.
+- **there are 768 gates, not one.** At 20 fps that is ~15,000 threshold
+  decisions a second, so the tail of the noise distribution is sampled
+  constantly. Measured: at 2×/4× MAD, noise alone crossed the lower threshold
+  ~11% of the time — one pixel in nine escaped filtering every frame, which was
+  the visible sparkle.
+
+**A SPATIAL gate does work**, and DDE contains one: `if(ad<=core) d=0`. It
+succeeds where the temporal gate failed because its fallback value is the local
+average rather than a stale one — nothing to go stale, nothing to ghost.
+
+### DDE: the base must match the mode
+
+The base filter and the gain are not independent choices:
+
+| mode | base | gain | why |
+|---|---|---|---|
+| **D1 denoise** | edge-aware | 1.0 | edges stay in the base, the detail layer is sub-edge texture, coring deletes it |
+| **D2 enhance** | smooth 3×3 | 1.75× | edges land in the *detail* layer where the gain can boost them |
+| **D3 strong** | smooth 5×5 | 2.5× | a wider base leaves more of each edge in the detail layer |
+
+Using the edge-aware base for **both** was a design error and produced two modes
+that were visually identical. An edge-aware base follows edges by construction,
+so they never reach the detail layer: measured, only 19% of pixels had any
+detail surviving the coring, with a mean of 2 counts. Boosting 2 counts by 1.75×
+on a fifth of the pixels is invisible. With a smooth base, D2 carries 3.0 counts
+and D3 4.7.
+
+The **radius matters more than the gain** — it is the unsharp-mask radius
+control. Watch for halos at D3.
+
+> **The noise metric flatters gates.** `noise_spatial()` is a median of
+> horizontal differences, and coring zeroes most of them, so *any* gate scores
+> brilliantly on it — including one that is deleting genuine faint detail. It
+> also cannot separate D1 from D2, since the gain only touches detail that
+> survives coring. Judge these by eye.
+
 ## The hard floor
 
 I2C is **18.1 ms** and cannot be improved: the sensor corrupts data above this
