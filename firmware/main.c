@@ -126,11 +126,18 @@ static int overlay_on = 1;
 int view_mode = 0;   /* interpolation + temporal filter */
 #define VIEW_INTERP  (view_mode != 1)
 #define VIEW_FILTER  (view_mode == 0)
-#define VIEW_DDE     (dde_on)
+#define VIEW_DDE     (dde_mode != 0)
 /* V: 0 = interp+filter, 1 = raw 10x10 blocks, 2 = interp only.
  * DDE and the filter length are separate fields now, so any combination is
  * reachable from the wheel rather than being encoded into the view mode. */
-static int dde_on    = 1;
+/* D: 0 = off, 1 = DENOISE (gain 1.0), 2 = ENHANCE (gain 1.75).
+ * Same stage either way. At gain 1.0 nothing is boosted, so what remains is a
+ * pure edge-preserving denoiser: the coring zeroes detail below the measured
+ * spatial noise, and the edge-aware base keeps edges. This is a noise gate, but
+ * a SPATIAL one -- which works where the per-pixel temporal gate failed,
+ * because its fallback value is the local average rather than a stale previous
+ * value, so there is nothing to go stale and nothing to ghost. */
+static int dde_mode  = 2;
 static int tfilt_n   = TFILT_MAX;   /* 3-frame rolling average */
 static int refresh64 = (REFRESH_SEL == 7);
 static int sel       = 0;   /* which status field the wheel adjusts: P V G B D H R */
@@ -532,7 +539,8 @@ static void denoise(void){
  *    spent the temporal filter removing.
  * Cost is ~40k operations on 768 pixels, against ~1.2M cycles per frame
  * currently spent spinning on the sensor's data-ready flag. */
-#define DDE_GAIN 28        /* 16 = 1.0x (off), 28 = 1.75x */
+#define DDE_GAIN_DENOISE 16   /* 1.0x -- no boost, coring only */
+#define DDE_GAIN_ENHANCE 28   /* 1.75x */
 static int16_t dde_base[768];
 
 /* Median |difference| between horizontally adjacent pixels.
@@ -561,6 +569,7 @@ static int32_t noise_spatial(void){
 }
 
 static void dde(void){
+    const int32_t gain = (dde_mode==1) ? DDE_GAIN_DENOISE : DDE_GAIN_ENHANCE;
     int32_t nz = noise_spatial();
     dbg[11]=(uint32_t)nz;
     const int32_t sim  = nz*3;                 /* "same surface" threshold */
@@ -589,7 +598,7 @@ static void dde(void){
         int32_t d=(int32_t)frame[i]-(int32_t)dde_base[i];
         int32_t ad=d<0?-d:d;
         if(ad<=core) d=0;
-        else{ d = (d>0)?(d-core):(d+core); d = (d*DDE_GAIN)>>4; }
+        else{ d = (d>0)?(d-core):(d+core); d = (d*gain)>>4; }
         int32_t v=(int32_t)dde_base[i]+d;
         frame[i]=(int16_t)(v>32767?32767:(v<-32768?-32768:v));
     }
@@ -863,7 +872,7 @@ static void render_band(int Y0,int Y1){
  *   G<x>  gamma
  *   B<n>  box filter over n frames; 0 = off entirely (1 is skipped, being
  *         the identity), E = adaptive EMA instead
- *   D<n>  DDE on/off */
+ *   D<n>  DDE: 0 off, 1 denoise (gain 1.0), 2 enhance (gain 1.75) */
 static int st_field(int x,int idx,int8_t lead,const int8_t *d,int nd){
     int8_t g[8]; int n=0;
     g[n++]=lead;
@@ -894,10 +903,10 @@ static void draw_fps_if_changed(void){
 static void draw_status_if_changed(void){
     static int l_p=-1,l_v=-1,l_g=-1,l_on=-1,l_b=-1,l_d=-1,l_h=-1,l_s=-1,l_r=-1;
     if(pal_id==l_p && view_mode==l_v && gamma_id==l_g && overlay_on==l_on
-       && tfilt_n==l_b && dde_on==l_d && refresh64==l_h && sel==l_s
+       && tfilt_n==l_b && dde_mode==l_d && refresh64==l_h && sel==l_s
        && ref_pipe==l_r) return;
     l_p=pal_id; l_v=view_mode; l_g=gamma_id; l_on=overlay_on;
-    l_b=tfilt_n; l_d=dde_on; l_h=refresh64; l_s=sel; l_r=ref_pipe;
+    l_b=tfilt_n; l_d=dde_mode; l_h=refresh64; l_s=sel; l_r=ref_pipe;
 
     fill_rect(0,0,LCD_W,TOP_H,C_BLACK);
     fps_dirty=1;              /* the wipe took the fps with it */
@@ -914,7 +923,7 @@ static void draw_status_if_changed(void){
 #else
     d[0]=-1;                                   x=st_field(x,3,GL_E,d,0);
 #endif
-    d[0]=(int8_t)(dde_on?1:0);                 x=st_field(x,4,GL_D,d,1);
+    d[0]=(int8_t)dde_mode;                     x=st_field(x,4,GL_D,d,1);
     d[0]=refresh64?6:3; d[1]=refresh64?4:2;    x=st_field(x,5,GL_H,d,2);
     d[0]=(int8_t)(ref_pipe?1:0);               x=st_field(x,6,GL_R,d,1);
     (void)x;
@@ -1074,7 +1083,7 @@ int main(void){
                             else    tfilt_n = (tfilt_n==0) ? TFILT_MAX
                                             : (tfilt_n<=2) ? 0 : tfilt_n-1;
                             hist_fill=0; hist_pos=0;                break;
-                    case 4: dde_on = !dde_on;                       break;
+                    case 4: dde_mode = (dde_mode + 3 + d) % 3;      break;
                     case 6: ref_pipe = !ref_pipe;
                             hist_fill=0; hist_pos=0;                break;
                     case 5: refresh64 = !refresh64;
@@ -1210,6 +1219,7 @@ int main(void){
          * setting can be A/B'd without eyeballing it */
         dbg[11]=(uint32_t)noise_spatial();
         { uint32_t td=CYC; if(VIEW_DDE) dde(); dbg[3]=CYC-td; }
+        dbg[12]=(uint32_t)noise_spatial();   /* post-DDE, to quantify D */
 #endif
 
         t=CYC;
