@@ -1184,6 +1184,9 @@ int main(void){
 #else
         if(VIEW_FILTER) denoise(); else acc_primed=0;
 #endif
+        /* measure post-filter, pre-DDE spatial noise every frame, so the B
+         * setting can be A/B'd without eyeballing it */
+        dbg[11]=(uint32_t)noise_spatial();
         { uint32_t td=CYC; if(VIEW_DDE) dde(); dbg[3]=CYC-td; }
 #endif
 
